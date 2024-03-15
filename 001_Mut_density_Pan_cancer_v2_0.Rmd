@@ -1,0 +1,1161 @@
+---
+title: "Pan-cancer analysis of mutation density at constitutive origins"
+author: "Pierre Murat"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_collapsed: yes
+    toc_depth: 3
+    number_sections: yes
+    theme: lumen
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+This notebook reports the analysis of mutational burden (somatic snvs/indels and SVs) at constitutive origins.
+
+# Data formating
+
+## Simple somatic mutations
+
+Format aggregated simple somatic mutations ICGC data
+
+Simple somatic mutations are from the International Cancer Genome Consortium (ICGC) - Release 28 (https://dcc.icgc.org/releases/release_28).
+Data is using GRCh37/hg19 coordinates.
+
+```{bash, eval = F}
+# Convert vcf file to bed file reporting the position and nature of variants together with the variant frequency
+# with perl/bash
+perl -lane 'print join "\t",(@F[0,1,3,4], /(?:OCCURRENCE)=[^;]+/g)' /cephfs/pmurat/OriVir/Dataset/ICGC/simple_somatic_mutation.aggregated.vcf \
+        > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/simple_somatic_mutation.aggregated.tsv
+# Reformat
+sed 's/\OCCURRENCE=//g' /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/simple_somatic_mutation.aggregated.tsv | \
+  awk '{split ($5, T, "|"); $5 = T[1] OFS T[3] OFS T[4]}1' OFS="\t" | sed 's/,.*$//' \
+  > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/simple_somatic_mutation.aggregated.2.tsv
+# Remove comment lines
+grep -o '^[^#]*' /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/simple_somatic_mutation.aggregated.2.tsv \
+  > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.simple.somatic.mutation.aggregated.tsv
+# delete temporary files
+rm -f /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/simple_somatic_mutation.aggregated.tsv
+rm -f /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/simple_somatic_mutation.aggregated.2.tsv
+# count variants
+wc -l /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.simple.somatic.mutation.aggregated.tsv
+# 81,782,588 variants
+# Split snvs and indels
+awk 'length($3)==1 && length($4)==1' /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.simple.somatic.mutation.aggregated.tsv \
+  > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.tsv
+awk 'length($3)!=1 || length($4)!=1' /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.simple.somatic.mutation.aggregated.tsv \
+  > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.tsv
+# count variants
+wc -l /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.tsv
+# 74,817,293 snvs
+wc -l /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.tsv
+# 6,965,295 indels
+# Sort files
+sort -k1,1 -k2,2n /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.tsv > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.sorted.tsv
+sort -k1,1 -k2,2n /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.tsv > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.sorted.tsv
+# Duplicate second column and generate bed files
+# snvs
+awk '{print $1,$2,$2+=1,$3,$4,$5,$6,$7}' /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.sorted.tsv > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.temp.bed
+cat /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.temp.bed | tr ' ' '\t' > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.sorted.bed
+rm -f /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.temp.bed
+# indels
+awk '{print $1,$2,$2+=1,$3,$4,$5,$6,$7}' /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.sorted.tsv > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.temp.bed
+cat /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.temp.bed | tr ' ' '\t' > /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.sorted.bed
+rm -f /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.temp.bed
+
+```
+
+## Structural somatic mutations
+
+Generated manifest from the ICGC data portal using the following filtering criteria:
+StSM > Collaboratory - Toronto > Broad variant call pipeline --> 5,830 files from 1,830 donors (manifest.1698320954196.tar.gz)
+
+Load and modify the manifest
+
+```{r, eval = F}
+# r
+library(dplyr)
+library(stringr)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+#
+SV.manifest.df <- read.table(gzfile("./Dataset/ICGC/SV/manifest.1698320954196.tar.gz"), skip = 1)
+SV.manifest.df <- SV.manifest.df %>% dplyr::select(V9, V10, V2, V3, V5)
+colnames(SV.manifest.df) <- c("donor.id", "project", "file.id", "object.id", "file.name")
+# Select only SV detected by both snowman and dRanger
+SV.manifest.snowman.dRanger.df <- SV.manifest.df %>% filter(str_detect(file.name, 'dRanger_snowman')) # 1,940 entries, 1,820 donors
+# Save manifest
+write.table(SV.manifest.snowman.dRanger.df, "./Dataset/ICGC/SV/SV.manifest.tsv", sep="\t", col.names = F, row.names = F, quote = F)
+```
+
+Download files with score-client using the /cephfs2/pmurat/OriCan/Scripts/sv.score.client.sh
+
+Aggregate data
+
+```{r, eval = F}
+#
+library(tidyr)
+# Using a loop on the previous manifest table
+# List vcf files
+vcf.files <- list.files("./Dataset/ICGC/SV/VCF/")
+vcf.files <- vcf.files[!grepl(".idx", vcf.files)]
+# 
+SV.aggregate.df <- tibble()
+for (i in 1:length(vcf.files)) {
+  vcf.files.i <- vcf.files[i]
+  print(vcf.files.i)
+  df.i <- SV.manifest.snowman.dRanger.df %>% filter(file.name == vcf.files.i)
+  donor.i <- df.i$donor.id
+  project.i <- df.i$project
+  path.i <- paste("/Volumes/cephfs2/pmurat/OriCan/Dataset/ICGC/SV/VCF/", vcf.files.i, sep = "")
+  vcf.i <- read.table(gzfile(path.i), comment.char = "#") %>% dplyr::select(V1, V2, V3, V4, V5, V8)
+  vcf.i <- vcf.i %>% mutate(V9 = str_c(str_match(V8, ";SVCLASS=(.*);")[, 2])) %>% dplyr::select(-V8) %>% mutate(V10 = donor.i, V11 = project.i)
+  vcf.i[is.na(vcf.i)] <- "n_d"
+  SV.aggregate.df <- rbind(SV.aggregate.df,vcf.i)
+}
+write.table(SV.aggregate.df, "./Dataset/ICGC/SV/ICGC.somatic.SV.aggregated.tsv", sep="\t", col.names = F, row.names = F, quote = F)
+nrow(SV.aggregate.df) # 1,457,904 structural variants
+```
+
+```{bash, eval = F}
+# Sort file
+sort -k1,1 -k2,2n /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.somatic.SV.aggregated.tsv > /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.somatic.SV.aggregated.sorted.tsv
+# Duplicate second column to generate a bed file
+awk '{print $1,$2,$2+=1,$3,$4,$5,$6,$7,$8}' /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.somatic.SV.aggregated.sorted.tsv > /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.SV.temp.bed
+cat /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.SV.temp.bed | tr ' ' '\t' > /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.SV.aggregated.sorted.bed
+rm -f /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.SV.temp.bed
+```
+
+## Replication origins
+
+### Formatting
+
+Format origin coordinates and compute origin centers
+
+```{r, eval = F}
+# r
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+# Load origin coordinates
+constitutive.ori.hg38.df <- read.table("./Dataset/ori/GSM5658908_Ini-seq2.called.replication.origins.bed", skip=1)
+# Add origin id
+constitutive.ori.hg38.df <- constitutive.ori.hg38.df %>% mutate(ori.id = paste("ori", c(1:nrow(constitutive.ori.center.hg38.df)), sep = "."))
+# Compute origin width
+constitutive.ori.hg38.df <- constitutive.ori.hg38.df %>% mutate(ori.width = V3-V2)
+# Compute origin center
+constitutive.ori.center.hg38.df <- constitutive.ori.hg38.df %>% mutate(V2 = round((V2+V3)/2), V3=V2+1)
+# Save
+write.table(constitutive.ori.center.hg38.df, "./Dataset/ori/ori.center.hg38.bed", sep="\t", col.names = F, row.names = F, quote = F)
+```
+
+Liftover origin coordinates to hg19
+
+```{bash, eval = F}
+# Liftover to hg19
+liftOver -bedPlus=3 /cephfs2/pmurat/OriCan/Dataset/ori/ori.center.hg38.bed /cephfs/pmurat/Genomes/LiftOver_chains/hg38ToHg19.over.chain.gz /cephfs2/pmurat/OriCan/Dataset/ori/ori.center.hg19.bed /cephfs2/pmurat/OriCan/Dataset/ori/ori.liftover.unmapped
+# Remove "chr"
+sed 's/^chr\|%$//g' /cephfs2/pmurat/OriCan/Dataset/ori/ori.center.hg19.bed > /cephfs2/pmurat/OriCan/Dataset/ori/ori.center.hg19.NCBI.bed
+# Sort
+sort -k1,1 -k2,2n /cephfs2/pmurat/OriCan/Dataset/ori/ori.center.hg19.NCBI.bed > /cephfs2/pmurat/OriCan/Dataset/ori/ori.center.hg19.NCBI.sorted.bed
+```
+
+Summary - 23,838 constitutive origins
+
+### Filtering
+
+We exclude origin clusters to avoid complex/overlapping signals. To so, we filter out origins with an inter-origins distance smaller than 20kb. 
+
+```{r, eval = F}
+# r
+
+# Constitutive origin filtering
+ori.center.df <- read.table("./Dataset/ori/ori.center.hg19.NCBI.sorted.bed")
+ori.inter.dist.df <- ori.center.df %>% mutate(prev = V2-lag(V2), nxt = lead(V2)-V2) %>% 
+  mutate(min = pmin(prev, nxt, na.rm = T)) %>% mutate(min = ifelse(min > 0, min, NA)) %>% 
+  filter(min >= 20000) %>% dplyr::select(-prev, -nxt, -min)
+# 9,341 remaining origins
+
+# Save final origin coordinate bed files
+write.table(ori.inter.dist.df, "./Dataset/ori/ori.inter.hg19.NCBI.bed", sep="\t", col.names = F, row.names = F, quote = F)
+```
+
+Summary - 9,341 selected constitutive origins
+
+### Reshuffle coordinates
+
+In order to compare mutation rates to basal level, origin coordinates are reshuffled using bedtools reshuffle.
+A hg19.genome file is prepared from the fai file of hg19.
+
+```{bash, eval = F}
+# bash
+
+bedtools shuffle -i /cephfs2/pmurat/OriCan/Dataset/ori/ori.inter.hg19.NCBI.bed \
+  -g /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/hg19.genome.fai -chrom \
+  > /cephfs2/pmurat/OriCan/Dataset/ori/ori.reshuffle.hg19.NCBI.bed
+sort -k1,1 -k2,2n /cephfs2/pmurat/OriCan/Dataset/ori/ori.reshuffle.hg19.NCBI.bed > /cephfs2/pmurat/OriCan/Dataset/ori/ori.reshuffle.hg19.NCBI.sorted.bed  
+```
+
+
+### Origin base composition
+
+Compute base composition of selected origins for correcting mutation rates for local sequence composition effects
+
+#### Base composition statistics
+
+Select 10 kb domains centered on origins
+
+```{r, eval = F}
+# r
+ori.10kb.df <- ori.inter.dist.df %>% mutate(V2 = V2-10000, V3 = V3+9999)
+write.table(ori.10kb.df, "./Dataset/ori/ori.10kb.domain.hg19.NCBI.bed", sep="\t", col.names = F, row.names = F, quote = F)
+```
+
+Partition origin domains in 100 nucleotides bins
+
+```{bash, eval = F}
+# bash
+bedtools makewindows -b /cephfs2/pmurat/OriCan/Dataset/ori/ori.10kb.domain.hg19.NCBI.bed \
+-w 100 -i winnum > /cephfs2/pmurat/OriCan/Dataset/ori/ori.10kb.domain.100nt.split.hg19.NCBI.bed
+```
+
+Compute base composition
+
+```{r, eval = F}
+# r
+library(rtracklayer)
+library(BSgenome.Hsapiens.UCSC.hg19)
+# Load domain/bin coordinates
+ori.10kb.domain.100nt.split.gr <- import("./Dataset/ori/ori.10kb.domain.100nt.split.hg19.NCBI.bed")
+my.chr <- c(1:22, "X", "Y")
+ori.10kb.domain.100nt.split.gr <- ori.10kb.domain.100nt.split.gr[seqnames(ori.10kb.domain.100nt.split.gr) %in% my.chr]
+seqlevelsStyle(ori.10kb.domain.100nt.split.gr) <- "UCSC"
+# Recover sequences and compute base composition statistics
+ori.views <- Views(Hsapiens, ori.10kb.domain.100nt.split.gr)
+ori.bc <- letterFrequency(ori.views, c("A", "C", "G", "T"), as.prob = FALSE)
+ori.bc.df <- cbind.data.frame(bin = ori.10kb.domain.100nt.split.gr$name, ori.bc)
+ori.bc.summary <- ori.bc.df %>% group_by(bin) %>% summarise_at(c("A", "C", "G", "T"), sum) %>%
+  mutate(dist = (as.numeric(bin)-100)*100,
+         A.freq = A/(A+C+T+G),
+         C.freq = C/(A+C+T+G),
+         G.freq = G/(A+C+T+G),
+         T.freq = T/(A+C+T+G),
+         GC=(G+C)/(A+C+T+G))
+write.csv(ori.bc.summary, "./Dataset/ori/ori.bc.summary.csv", quote = F, row.names = F)
+```
+
+#### Base composition of individual origins
+
+Select 10 kb domains centered on origins
+
+```{r, eval = F}
+# r
+ori.1kb.df <- ori.inter.dist.df %>% mutate(V2 = V2-500, V3 = V3+499)
+write.table(ori.1kb.df, "./Dataset/ori/ori.1kb.domain.hg19.NCBI.bed", sep="\t", col.names = F, row.names = F, quote = F)
+```
+
+Compute base composition of individual origins
+
+```{r, eval = F}
+# r
+library(rtracklayer)
+library(BSgenome.Hsapiens.UCSC.hg19)
+# Load domain/bin coordinates
+ori.1kb.domain.bed <- read.table("./Dataset/ori/ori.1kb.domain.hg19.NCBI.bed")
+colnames(ori.1kb.domain.bed) <- c("seqnames", "start", "end", "EFF", "ori.id")
+ori.1kb.domain.gr <- makeGRangesFromDataFrame(ori.1kb.domain.bed, keep.extra.columns = T)
+my.chr <- c(1:22, "X", "Y")
+ori.1kb.domain.gr <- ori.1kb.domain.gr[seqnames(ori.1kb.domain.gr) %in% my.chr]
+seqlevelsStyle(ori.1kb.domain.gr) <- "UCSC"
+# Recover sequences and compute base composition statistics
+ori.1kb.views <- Views(Hsapiens, ori.1kb.domain.gr)
+ori.1kb.bc <- letterFrequency(ori.1kb.views, c("A", "C", "G", "T"), as.prob = FALSE)
+ori.1kb.bc.df <- cbind.data.frame(ori.id = ori.1kb.domain.gr$ori.id, EFF = ori.1kb.domain.gr$EFF, ori.1kb.bc)
+write.csv(ori.1kb.bc.df, "./Dataset/ori/ori.1kb.bc.summary.csv", quote = F, row.names = F)
+```
+
+# Mutational burden
+
+## Origin mutation density
+
+Compute distance from mutations to the closest origin (bedtools closest)
+
+```{bash, eval = F}
+# bash
+
+# at origins
+
+# snvs
+bedtools closest -a /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.sorted.bed \
+-b /cephfs2/pmurat/OriCan/Dataset/ori/ori.inter.hg19.NCBI.bed -D ref \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.bed
+# indels
+bedtools closest -a /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.sorted.bed \
+-b /cephfs2/pmurat/OriCan/Dataset/ori/ori.inter.hg19.NCBI.bed -D ref \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.bed
+# SVs
+bedtools closest -a /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.SV.aggregated.sorted.bed \
+-b /cephfs2/pmurat/OriCan/Dataset/ori/ori.inter.hg19.NCBI.bed -D ref \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.bed
+
+# at reshuffled origins
+
+# snvs
+bedtools closest -a /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.snvs.aggregated.sorted.bed \
+-b /cephfs2/pmurat/OriCan/Dataset/ori/ori.reshuffle.hg19.NCBI.sorted.bed -D ref \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.reshuffle.bed
+# indels
+bedtools closest -a /cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/ICGC.indels.aggregated.sorted.bed \
+-b /cephfs2/pmurat/OriCan/Dataset/ori/ori.reshuffle.hg19.NCBI.sorted.bed -D ref \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.reshuffle.bed
+# SVs
+bedtools closest -a /cephfs2/pmurat/OriCan/Dataset/ICGC/SV/ICGC.SV.aggregated.sorted.bed \
+-b /cephfs2/pmurat/OriCan/Dataset/ori/ori.reshuffle.hg19.NCBI.sorted.bed -D ref \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.reshuffle.bed
+```
+
+Select mutations in proximity to origins (+- 10kb)
+
+```{bash, eval = F}
+# origins
+# snvs
+awk '$14>=-10000 && $14<=10000' /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.bed \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.10kb.bed
+# indels
+awk '$14>=-10000 && $14<=10000' /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.bed \
+  > /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.10kb.bed
+# SVs
+awk '$15>=-10000 && $15<=10000' /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.bed \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.10kb.bed
+
+# reshuffled origins 
+# snvs
+awk '$14>=-10000 && $14<=10000' /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.reshuffle.bed \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.10kb.reshuffle.bed
+# indels
+awk '$14>=-10000 && $14<=10000' /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.reshuffle.bed \
+  > /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.10kb.reshuffle.bed
+# SVs
+awk '$15>=-10000 && $15<=10000' /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.reshuffle.bed \
+> /cephfs2/pmurat/OriCan/001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.10kb.reshuffle.bed
+```
+
+Compute raw mutation count at origins using the reshuffled coordinates for assessing background.
+
+Distances computed by bedtools are inverted to phase the analysis on origins.
+
+```{r, eval = F}
+# r
+# Load data
+# snvs
+ICGC.snvs.closest.ori.10kb.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.10kb.bed")
+ICGC.snvs.closest.ori.10kb.reshuffle.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.10kb.reshuffle.bed")
+# indels
+ICGC.indels.closest.ori.10kb.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.10kb.bed")
+ICGC.indels.closest.ori.10kb.reshuffle.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.indels.closest.ori.10kb.reshuffle.bed")
+# SVs
+ICGC.SV.closest.ori.10kb.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.10kb.bed")
+ICGC.SV.closest.ori.10kb.reshuffle.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.10kb.reshuffle.bed")
+
+# Compute count in 100 nt windows
+# snvs
+ICGC.snvs.ori.count.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(V14 = -V14) %>% mutate(dist = (as.numeric(cut(V14, breaks = seq(-10000, 10000, 100)))-100)*100) %>% group_by(dist) %>% summarise(snvs.count=n())
+ICGC.snvs.ori.count.reshuffle.df <- ICGC.snvs.closest.ori.10kb.reshuffle.df %>% mutate(V14 = -V14) %>% mutate(dist = (as.numeric(cut(V14, breaks = seq(-10000, 10000, 100)))-100)*100) %>% group_by(dist) %>% summarise(snvs.count.reshuffle=n())
+# indels
+ICGC.indels.ori.count.df <- ICGC.indels.closest.ori.10kb.df %>% mutate(V14 = -V14) %>% mutate(dist = (as.numeric(cut(V14, breaks = seq(-10000, 10000, 100)))-100)*100) %>% group_by(dist) %>% summarise(indels.count=n())
+ICGC.indels.ori.count.reshuffle.df <- ICGC.indels.closest.ori.10kb.reshuffle.df %>% mutate(V14 = -V14) %>% mutate(dist = (as.numeric(cut(V14, breaks = seq(-10000, 10000, 100)))-100)*100) %>% group_by(dist) %>% summarise(indels.count.reshuffle=n())  
+# SVs
+ICGC.SV.ori.count.df <- ICGC.SV.closest.ori.10kb.df %>% mutate(V15 = -V15) %>% mutate(dist = (as.numeric(cut(V15, breaks = seq(-10000, 10000, 100)))-100)*100) %>% group_by(dist) %>% summarise(SV.count=n())
+ICGC.SV.ori.count.reshuffle.df <- ICGC.SV.closest.ori.10kb.reshuffle.df %>% mutate(V15 = -V15) %>% mutate(dist = (as.numeric(cut(V15, breaks = seq(-10000, 10000, 100)))-100)*100) %>% group_by(dist) %>% summarise(SV.count.reshuffle=n())
+
+# Join and save results
+ICGC.mut.count.df <- ICGC.snvs.ori.count.df %>% left_join(ICGC.snvs.ori.count.reshuffle.df)  %>% left_join(ICGC.indels.ori.count.df) %>% left_join(ICGC.indels.ori.count.reshuffle.df) %>% left_join(ICGC.SV.ori.count.df) %>% left_join(ICGC.SV.ori.count.reshuffle.df)
+saveRDS(ICGC.mut.count.df, "./001_Mut_density_Pan_cancer/rds/ICGC.mut.count.df.rds")
+```
+
+Plot
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+# Load df
+ICGC.mut.count.df <- readRDS("./001_Mut_density_Pan_cancer/rds/ICGC.mut.count.df.rds")
+# Plot snvs
+# snvs
+ICGC.snvs.count.plot <- ICGC.mut.count.df %>% dplyr::select(dist, snvs.count, snvs.count.reshuffle) %>% gather(variable, value, -dist) %>%   ggplot(aes(x=dist, y=value, colour=variable)) + geom_line() +
+  scale_color_manual(values = c("#E41F1A", "#4F4A75")) +
+  xlim(-5000,5000) + ylim(15000,32000) +
+  xlab("Distance from origin (bp)") + ylab("snvs count") + ggtitle("snvs distribution at origins") +
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.snvs.count.plot
+# indels
+ICGC.indels.count.plot <- ICGC.mut.count.df %>% dplyr::select(dist, indels.count, indels.count.reshuffle) %>% gather(variable, value, -dist) %>% 
+  ggplot(aes(x=dist, y=value, colour=variable)) + geom_line() +
+  scale_color_manual(values = c("#E41F1A", "#4F4A75")) +
+  xlim(-5000,5000) + ylim(1700,3500) +
+  xlab("Distance from origin (bp)") + ylab("indels count") + ggtitle("indels distribution at origins") +
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.indels.count.plot
+# SVs
+ICGC.SV.count.plot <- ICGC.mut.count.df %>% dplyr::select(dist, SV.count, SV.count.reshuffle) %>% gather(variable, value, -dist) %>% 
+  ggplot(aes(x=dist, y=value, colour=variable)) + geom_line() +
+  scale_color_manual(values = c("#E41F1A", "#4F4A75")) +
+  xlim(-5000,5000) + ylim(300,700) +
+  xlab("Distance from origin (bp)") + ylab("SV count") + ggtitle("SV distribution at origins") +
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.SV.count.plot
+
+pdf("./Rplots/ICGC.snvs.count.plot.pdf", width=7, height=6, useDingbats=FALSE)
+ICGC.snvs.count.plot
+dev.off()
+
+pdf("./Rplots/ICGC.indels.count.plot.pdf", width=7, height=6, useDingbats=FALSE)
+ICGC.indels.count.plot
+dev.off()
+
+pdf("./Rplots/ICGC.SV.count.plot.pdf", width=7, height=6, useDingbats=FALSE)
+ICGC.SV.count.plot
+dev.off()
+
+# Compute fold enrichment
+ICGC.mut.ori.FC.df <- ICGC.mut.count.df %>% mutate(class = case_when(dist == 0 ~ "ori",
+                                                                      dist <= -1000 | dist >= 1000 ~ "flanks",
+                                                                      T ~ "other")) %>% group_by(class) %>% 
+  summarise(snvs.mean = mean(snvs.count, na.rm = T), indels.mean = mean(indels.count, na.rm = T), SV.mean = mean(SV.count, na.rm = T))
+# snvs: 30685/18008 = 1.703965
+# indels: 30685/18008 = 1.078405
+# SVs: 30685/18008 = 1.503401
+```
+
+## Origin mutation rate
+
+Compute snvs mutation rate for GC/AT mutations and each pyrimidine mutation corrected by the base composition at origin
+
+```{r, eval = F}
+# r
+# Load base composition statistics
+ori.bc.summary <- read.csv("./Dataset/ori/ori.bc.summary.csv")
+
+# For GC/AT mutations
+ICGC.snvs.ori.mut.rate.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14) %>% 
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  mutate(mut.type = ifelse((V4 == "G" | V4 == "C"), "GC", "AT")) %>% group_by(dist) %>%
+  summarise(GC.mut = sum(mut.type == "GC"), AT.mut = sum(mut.type == "AT")) %>%
+  right_join(ori.bc.summary) %>%
+  mutate(GC.rate = GC.mut/(G+C), AT.rate=AT.mut/(A+T)) %>% 
+  mutate(GC.rate.fold=log2(GC.rate/mean(GC.rate[c(1:20,180:200)])), AT.rate.fold=log2(AT.rate/mean(AT.rate[c(1:20,180:200)])))
+ICGC.GC.snvs.ori.mut.rate.df <- ICGC.snvs.ori.mut.rate.df %>% dplyr::select(dist, rate = GC.rate.fold) %>% mutate(type = "GC")
+ICGC.AT.snvs.ori.mut.rate.df <- ICGC.snvs.ori.mut.rate.df %>% dplyr::select(dist, rate = AT.rate.fold) %>% mutate(type = "AT")
+
+# For each pyrimidine mutations
+# C>A
+ICGC.CA.ori.mut.rate.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14) %>% 
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  filter((V4 == "C" & V5 == "A")|(V4 == "G" | V5 == "T")) %>% 
+  group_by(dist) %>% summarise(CA.mut=n()) %>% right_join(ori.bc.summary) %>% mutate(CA.rate=CA.mut/(G+C), CA.rate.fold=log2(CA.rate/mean(CA.rate[c(1:20,180:200)]))) %>% dplyr::select(dist, rate = CA.rate.fold) %>% mutate(type = "C>A")
+
+# C>G
+ICGC.CG.ori.mut.rate.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14) %>% 
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  filter((V4 == "C" & V5 == "G")|(V4 == "G" | V5 == "C")) %>% 
+  group_by(dist) %>% summarise(CG.mut=n()) %>% right_join(ori.bc.summary) %>% mutate(CG.rate=CG.mut/(G+C), CG.rate.fold=log2(CG.rate/mean(CG.rate[c(1:20,180:200)]))) %>% dplyr::select(dist, rate = CG.rate.fold) %>% mutate(type = "C>G")
+
+# C>T
+ICGC.CT.ori.mut.rate.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14) %>% 
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  filter((V4 == "C" & V5 == "T")|(V4 == "G" | V5 == "A")) %>% 
+  group_by(dist) %>% summarise(CT.mut=n()) %>% right_join(ori.bc.summary) %>% mutate(CT.rate=CT.mut/(G+C), CT.rate.fold=log2(CT.rate/mean(CT.rate[c(1:20,180:200)]))) %>% dplyr::select(dist, rate = CT.rate.fold) %>% mutate(type = "C>T")
+
+# T>A
+ICGC.TA.ori.mut.rate.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14) %>% 
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  filter((V4 == "T" & V5 == "A")|(V4 == "A" | V5 == "T")) %>% 
+  group_by(dist) %>% summarise(TA.mut=n()) %>% right_join(ori.bc.summary) %>% mutate(TA.rate=TA.mut/(T+A), TA.rate.fold=log2(TA.rate/mean(TA.rate[c(1:20,180:200)]))) %>% dplyr::select(dist, rate = TA.rate.fold) %>% mutate(type = "T>A")
+
+# T>C
+ICGC.TC.ori.mut.rate.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14) %>% 
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  filter((V4 == "T" & V5 == "C")|(V4 == "A" | V5 == "G")) %>% 
+  group_by(dist) %>% summarise(TC.mut=n()) %>% right_join(ori.bc.summary) %>% mutate(TC.rate=TC.mut/(T+A), TC.rate.fold=log2(TC.rate/mean(TC.rate[c(1:20,180:200)]))) %>% dplyr::select(dist, rate = TC.rate.fold) %>% mutate(type = "T>C")
+
+# T>G
+ICGC.TG.ori.mut.rate.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14) %>% 
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  filter((V4 == "T" & V5 == "G")|(V4 == "A" | V5 == "C")) %>% 
+  group_by(dist) %>% summarise(TG.mut=n()) %>% right_join(ori.bc.summary) %>% mutate(TG.rate=TG.mut/(T+A), TG.rate.fold=log2(TG.rate/mean(TG.rate[c(1:20,180:200)]))) %>% dplyr::select(dist, rate = TG.rate.fold) %>% mutate(type = "T>G")
+
+# Prepare summary df
+ICGC.snvs.ori.mut.summary.rate.df <- rbind(ICGC.GC.snvs.ori.mut.rate.df, ICGC.AT.snvs.ori.mut.rate.df,
+                                           ICGC.CA.ori.mut.rate.df, ICGC.CG.ori.mut.rate.df, ICGC.CT.ori.mut.rate.df,
+                                           ICGC.TA.ori.mut.rate.df, ICGC.TC.ori.mut.rate.df, ICGC.TG.ori.mut.rate.df)
+saveRDS(ICGC.snvs.ori.mut.summary.rate.df, "./001_Mut_density_Pan_cancer/rds/ICGC.snvs.ori.mut.summary.rate.df.rds")
+```
+
+Plot
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+# Load df
+ICGC.snvs.ori.mut.summary.rate.df <- readRDS("./001_Mut_density_Pan_cancer/rds/ICGC.snvs.ori.mut.summary.rate.df.rds")
+# Plot GC>AT and AT>GC mutation rates
+ICGC.GC.AT.rate.plot <- ICGC.snvs.ori.mut.summary.rate.df %>% filter(type == "GC" | type == "AT") %>% 
+  ggplot(aes(x=dist, y=rate, colour=type)) + geom_line() +
+  scale_color_manual(values = c("#E41F1A", "#4F4A75")) +
+  xlim(-5000,5000) +
+  xlab("Distance from origin (bp)") + ylab("Mutation rate (log2 FC from background)") + ggtitle("snvs mutation rate at origins") +
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.GC.AT.rate.plot
+# Plot pyrimidine mutation rates
+ICGC.pyr.rate.plot <- ICGC.snvs.ori.mut.summary.rate.df %>% filter(type != "GC" & type != "AT") %>% 
+  ggplot(aes(x=dist, y=rate, colour=type)) + geom_line() +
+  scale_color_manual(values=c("#E69F00", "#56B4E9", "#009E73","#CC79A7", "#0072B2", "#D55E00")) +
+  xlim(-5000,5000) +
+  xlab("Distance from origin (bp)") + ylab("Mutation rate (log2 FC from background)") + ggtitle("snvs mutation rate at origins") +
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.pyr.rate.plot
+
+pdf("./Rplots/ICGC.pyr.rate.plot.pdf", width=7, height=6, useDingbats=FALSE)
+ICGC.pyr.rate.plot
+dev.off()
+```
+
+## Allele frequency at origins
+
+Assess the distribution of snvs allele frequency at origins 
+
+```{r, eval = F}
+# r
+# Load snvs data
+ICGC.snvs.closest.ori.10kb.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.10kb.bed")
+ICGC.snvs.closest.ori.10kb.reshuffle.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.snvs.closest.ori.10kb.reshuffle.bed")
+# Compute mean minor allele frequency (MAF) in bin of 100 nt
+# MAF is computed as the number of occurences of a given mutations divided by the total of screened patients (19729)
+ICGC.snvs.AF.ori.df <- ICGC.snvs.closest.ori.10kb.df %>% mutate(dist = -V14, MAF = (V7*V8)/19729) %>%
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  group_by(dist) %>% summarise(MAF = mean(MAF, na.rm = T)) %>% mutate(class = "ori")
+ICGC.snvs.AF.ori.reshuffle.df <- ICGC.snvs.closest.ori.10kb.reshuffle.df  %>% mutate(dist = -V14, MAF = (V7*V8)/19729) %>%
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  group_by(dist) %>% summarise(MAF = mean(MAF, na.rm = T)) %>% mutate(class = "ori.reshuffle")
+# Combine
+ICGC.snvs.AF.ori.summary.df <- rbind(ICGC.snvs.AF.ori.df, ICGC.snvs.AF.ori.reshuffle.df)
+saveRDS(ICGC.snvs.AF.ori.summary.df, "./001_Mut_density_Pan_cancer/rds/ICGC.snvs.AF.ori.summary.df.rds")
+```
+
+Plot
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+# Load df
+ICGC.snvs.AF.ori.summary.df <- readRDS("./001_Mut_density_Pan_cancer/rds/ICGC.snvs.AF.ori.summary.df.rds")
+# Plot 
+ICGC.snvs.AF.ori.summary.plot <- ICGC.snvs.AF.ori.summary.df %>% ggplot(aes(x=dist, y=MAF, colour=class)) + geom_line() +
+  scale_color_manual(values = c("#E41F1A", "#4F4A75")) +
+  xlim(-5000,5000) +
+  xlab("Distance from origin (bp)") + ylab("Mean minor allele frequency") + ggtitle("snvs allele frequency at origins") +
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.snvs.AF.ori.summary.plot
+
+pdf("./Rplots/ICGC.snvs.AF.ori.summary.plot.pdf", width=7, height=6, useDingbats=FALSE)
+ICGC.snvs.AF.ori.summary.plot
+dev.off()
+```
+
+# Pan-cancer analysis of mutation rates at origins
+
+## Mutation density at origins versus flanks by primary sites
+
+Prepare bed files.
+
+```{r, eval = F}
+# r
+# Load bed files
+ori.10kb.domains.df <- read.table("./Dataset/ori/ori.10kb.domain.hg19.NCBI.bed", sep="\t")
+colnames(ori.10kb.domains.df) <- c("seqnames", "start", "end", "EFF", "ori.id")
+ori.1kb.domains.df <- read.table("./Dataset/ori/ori.1kb.domain.hg19.NCBI.bed" , sep="\t")
+colnames(ori.1kb.domains.df) <- c("seqnames", "start", "end", "EFF", "ori.id")
+# Create gr
+my.chr <- c(1:22, "X", "Y")
+ori.10kb.domains.gr <- makeGRangesFromDataFrame(ori.10kb.domains.df, keep.extra.columns = T)
+ori.10kb.domains.gr <- ori.10kb.domains.gr[seqnames(ori.10kb.domains.gr) %in% my.chr]
+ori.1kb.domains.gr <- makeGRangesFromDataFrame(ori.1kb.domains.df, keep.extra.columns = T)
+ori.1kb.domains.gr <- ori.1kb.domains.gr[seqnames(ori.1kb.domains.gr) %in% my.chr]
+# Compute flank coordinates
+ori.flanks.gr <- setdiff(ori.10kb.domains.gr, ori.1kb.domains.gr, ignore.strand=TRUE)
+# Save gr
+saveRDS(ori.1kb.domains.gr, "./001_Mut_density_Pan_cancer/rds/ori.1kb.domains.gr.rds")
+saveRDS(ori.flanks.gr, "./001_Mut_density_Pan_cancer/rds/ori.flanks.gr.rds")
+# Prepare bed files
+ori.1kb.domains.bed <- as.data.frame(ori.1kb.domains.gr) %>% dplyr::select(seqnames, start, end)
+ori.flanks.bed <- as.data.frame(ori.flanks.gr) %>% dplyr::select(seqnames, start, end)
+# Save bed files
+write.table(ori.1kb.domains.bed, "./Dataset/ori/BED/ori.1kb.hg19.bed", sep="\t", col.names = F, row.names = F, quote = F)
+write.table(ori.flanks.bed, "./Dataset/ori/BED/ori.flanks.hg19.bed", sep="\t", col.names = F, row.names = F, quote = F)
+```
+
+Recover individual vcf files
+
+Generated manifest from the ICGC data portal using the following filtering criteria:
+SSM > Collaboratory - Toronto > WGS > VCF > Broad variant call pipeline --> 3,900 files from 1,830 donors
+(/cephfs2/pmurat/OriCan/Dataset/ICGC/SSM/manifest.1698683356752.tar.gz)
+
+Load and modify the manifest
+
+```{r, eval = F}
+# r
+library(dplyr)
+library(stringr)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+#
+SSM.manifest.df <- read.table(gzfile("./Dataset/ICGC/SSM/manifest.1698683356752.tar.gz"), skip = 1)
+SSM.manifest.df <- SSM.manifest.df %>% dplyr::select(V9, V10, V2, V3, V5)
+colnames(SSM.manifest.df) <- c("donor.id", "project", "file.id", "object.id", "file.name")
+# Select snvs
+snvs.manifest.df <- SSM.manifest.df %>% filter(str_detect(file.name, 'somatic.snv')) %>% separate(project, c("cancer.type", "project"), sep = "-") # 1,950 entries, 1,830 donors
+# Save manifest
+write.table(snvs.manifest.df, "./Dataset/ICGC/SSM/snvs.manifest.tsv", sep="\t", col.names = F, row.names = F, quote = F)
+```
+
+Download files with score-client using the /cephfs2/pmurat/OriCan/Scripts/snvs.score.client.sh
+
+Process data
+snvs count are reported as the number of snvs per kb
+
+```{r, eval = F}
+# r
+library(tidyr)
+# Open ori and flanks coordinates
+ori.1kb.domains.gr <- import("./Dataset/ori/BED/ori.1kb.hg19.bed")
+ori.flanks.gr <- import("./Dataset/ori/BED/ori.flanks.hg19.bed")
+# Compute gr width
+sum(width(ori.1kb.domains.gr)) # 9,340,000 bp
+sum(width(ori.flanks.gr)) # 177,441,320 bp 
+# List vcf files
+vcf.files <- list.files("./Dataset/ICGC/SSM/VCF/") # 3,892 files
+vcf.files <- vcf.files[!grepl(".idx", vcf.files)]  # 3,892 snvs vcf files
+# Compute snvs density ratios
+snvs.dens.ratio.df <- tibble()
+for (i in 1:length(vcf.files)) {
+vcf.files.i <- vcf.files[i]
+print(vcf.files.i)
+df.i <- snvs.manifest.df %>% filter(file.name == vcf.files.i)
+  donor.i <- df.i$donor.id
+  cancer.type.i <- df.i$cancer.type
+  project.i <- df.i$project
+path.i <- paste("./Dataset/ICGC/SSM/VCF/", vcf.files.i, sep = "")
+vcf.i <- read.table(gzfile(path.i), comment.char = "#") %>% dplyr::select(V1, V2, V4, V5)
+  count.i <- nrow(vcf.i)
+bed.i <- vcf.i %>% mutate(end = V2 + 1) %>% dplyr::select(seqnames = V1, start = V2, end, REF = V4, ALT = V5)
+gr.i <- makeGRangesFromDataFrame(bed.i)
+  ori.overlap.i <- subsetByOverlaps(gr.i, ori.1kb.domains.gr)
+    snvs.ori.count.i <- (length(ori.overlap.i)*1000)/9340000
+  flanks.overlap.i <- subsetByOverlaps(gr.i, ori.flanks.gr)
+    snvs.flanks.count.i <- (length(flanks.overlap.i)*1000)/177441320
+    df.summary.i <- cbind.data.frame(donor = donor.i, cancer.type = cancer.type.i, cancer.project = project.i, snvs.count = count.i, snvs.dens.ori = snvs.ori.count.i, snvs.dens.flanks = snvs.flanks.count.i) %>% mutate(snvs.dens.ratio = snvs.dens.ori/snvs.dens.flanks)
+snvs.dens.ratio.df <- rbind(snvs.dens.ratio.df,df.summary.i)
+}
+saveRDS(snvs.dens.ratio.df, "./001_Mut_density_Pan_cancer/rds/snvs.dens.ratio.df.rds")
+```
+
+Analyse results - genomes with less than 5,000 snvs are filtered out.
+We retained 1,056 genomes.
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(plotrix)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+
+# Load snvs density ratio df
+snvs.dens.ratio.df <- readRDS("./001_Mut_density_Pan_cancer/rds/snvs.dens.ratio.df.rds")
+
+# DONE PREVIOUSLY
+# # Load cancer project information
+# cancer.project.info.df <- read.csv("./Dataset/ICGC/projects_2023_10_30_04_53_06.tsv", sep = "\t") %>% separate(Project.Code, c("cancer.type", "project"), sep = "-") %>% dplyr::select(cancer.type, Primary.Site)
+# # Add primary site information
+# snvs.dens.ratio.df <- snvs.dens.ratio.df %>% left_join(cancer.project.info.df, by = "cancer.type")
+
+# Compute stats and means
+snvs.dens.ratio.summary.df <- snvs.dens.ratio.df %>% group_by(Primary.Site) %>% summarise(mean=mean(snvs.dens.ratio, na.rm=T), min=min(snvs.dens.ratio,na.rm=T), max=max(snvs.dens.ratio,na.rm=T)) %>% arrange(-mean)
+# Prepare plot
+# Stratified by primary sites
+snvs.dens.ratio.plot <- snvs.dens.ratio.df %>% filter(snvs.count >= 5000) %>% distinct() %>% 
+  ggplot(aes(x=reorder(Primary.Site,-snvs.dens.ratio, na.rm=T), y=snvs.dens.ratio, fill="#E41F1A", alpha = 0.3)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5) +
+  geom_jitter(color="black", size=0.4, alpha=0.4) + ylab("Mutation density ratio (ori/flanks)") +
+  geom_hline(yintercept=1, linetype="dashed") +
+  theme_bw() + theme(aspect.ratio=0.4, panel.grid.minor = element_line(linetype = "dotted"), legend.position = "none", axis.title.x=element_blank(), axis.text.x=element_text(angle=45,hjust=1))
+snvs.dens.ratio.plot
+# Stratified by cancer types
+snvs.dens.ratio.plot.2 <- snvs.dens.ratio.df %>% mutate(cancer.info = paste(cancer.type, Primary.Site, sep = " | ")) %>% filter(snvs.count >= 5000) %>% distinct() %>% ggplot(aes(x=reorder(cancer.info,-snvs.dens.ratio, na.rm=T), y=snvs.dens.ratio, fill="#E41F1A", alpha = 0.3)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5) +
+  geom_jitter(color="black", size=0.4, alpha=0.4) + ylab("Mutation density ratio (ori/flanks)") +
+  geom_hline(yintercept=1, linetype="dashed") +
+  theme_bw() + theme(aspect.ratio=0.4, panel.grid.minor = element_line(linetype = "dotted"), legend.position = "none", axis.title.x=element_blank(), axis.text.x=element_text(angle=45,hjust=1))
+snvs.dens.ratio.plot.2
+
+pdf("./Rplots/snvs.dens.ratio.plot.pdf", width=10, height=6, useDingbats=FALSE)
+snvs.dens.ratio.plot.2
+dev.off()
+
+# Assess the corelation between the total number of mapped snvs and the snvs ratio at origins
+snvs.dens.ratio.plot.3 <- snvs.dens.ratio.df %>% filter(snvs.dens.ratio > 0) %>% distinct() %>% 
+  ggplot(aes(x=snvs.count, y=snvs.dens.ratio)) +
+  geom_point(alpha = 0.2) + scale_x_continuous(trans = log10_trans(),
+                     breaks = trans_breaks("log10", function(x) 10^x),
+                     labels = trans_format("log10", math_format(10^.x))) + geom_smooth(span = 1e-6, se = T) +
+  geom_hline(yintercept=1, linetype="dashed") + ylab("Mutation density ratio (ori/flanks)") + xlab("Total snvs count") +
+  theme_bw() + theme(aspect.ratio=1, panel.grid.minor = element_line(linetype = "dotted"))
+snvs.dens.ratio.plot.3
+
+# Same analysis binning the total number of mutations
+snvs.dens.ratio.plot.summary.df <- snvs.dens.ratio.df %>% mutate(snvs.total.bin = ntile(snvs.count, 15)) %>% group_by(snvs.total.bin) %>% 
+  summarise(snvs.total.count = mean(snvs.count, na.rm = T), snvs.dens.ratio.mean = mean(snvs.dens.ratio, na.rm = T), snvs.dens.ratio.sd = std.error(snvs.dens.ratio, na.rm = T))
+#
+snvs.dens.ratio.plot.4 <- snvs.dens.ratio.plot.summary.df %>% ggplot(aes(x=snvs.total.count, y=snvs.dens.ratio.mean)) +
+  geom_line(color = "#4F4A75") +
+  geom_point(shape = 21, size = 2, color = "#4F4A75", fill = "white") + 
+  scale_x_continuous(trans = log10_trans(), breaks = trans_breaks("log10", function(x) 10^x), labels = trans_format("log10", math_format(10^.x))) +
+  geom_errorbar(aes(ymin=snvs.dens.ratio.mean-snvs.dens.ratio.sd, ymax=snvs.dens.ratio.mean+snvs.dens.ratio.sd), width=.1, position=position_dodge(0.05), color = "#4F4A75") +
+  ylab("Mutation density ratio (ori/flanks)") + xlab("Total snvs count") + ggtitle("Rho = -0.246, p-value < 2.2e-16") +
+  theme_bw() + theme(aspect.ratio=1, panel.grid.minor = element_line(linetype = "dotted"))
+cor.test(log10(snvs.dens.ratio.df$snvs.count), snvs.dens.ratio.df$snvs.dens.ratio) # Rho = -0.2457729, p-value < 2.2e-16
+snvs.dens.ratio.plot.4
+
+pdf("./Rplots/snvs.dens.ratio.cor.pdf", width=10, height=6, useDingbats=FALSE)
+snvs.dens.ratio.plot.4
+dev.off()
+
+# Plot also the number of snvs at origins versus the total number of mutations for comparison
+snvs.dens.ratio.plot.summary.2.df <- snvs.dens.ratio.df %>% mutate(snvs.total.bin = ntile(snvs.count, 15)) %>% group_by(snvs.total.bin) %>% 
+  summarise(snvs.total.count = mean(snvs.count, na.rm = T), snvs.ori.count.mean = mean(((snvs.dens.ori*9340000)/1000), na.rm = T), snvs.ori.count.sd = std.error(((snvs.dens.ori*9340000)/1000), na.rm = T))
+#
+snvs.dens.ratio.plot.5 <- snvs.dens.ratio.plot.summary.2.df %>% ggplot(aes(x=snvs.total.count, y=snvs.ori.count.mean)) +
+  geom_line(color = "#4F4A75") +
+  geom_point(shape = 21, size = 2, color = "#4F4A75", fill = "white") + 
+  scale_x_continuous(trans = log10_trans(), breaks = trans_breaks("log10", function(x) 10^x), labels = trans_format("log10", math_format(10^.x))) +
+  scale_y_continuous(trans = log2_trans(), breaks = trans_breaks("log2", function(x) 2^x)) +
+  geom_errorbar(aes(ymin=snvs.ori.count.mean-snvs.ori.count.sd, ymax=snvs.ori.count.mean+snvs.ori.count.sd), width=.1, position=position_dodge(0.05), color = "#4F4A75") +
+  ylab("snvs count at origins") + xlab("Total snvs count") + ggtitle("Rho = 0.954, p-value < 2.2e-16") +
+  theme_bw() + theme(aspect.ratio=1, panel.grid.minor = element_line(linetype = "dotted"))
+cor.test(snvs.dens.ratio.df$snvs.count, snvs.dens.ratio.df$snvs.dens.ori) # Rho = 0.9539956, p-value < 2.2e-16
+snvs.dens.ratio.plot.5
+
+pdf("./Rplots/snvs.dens.ratio.cor.2.pdf", width=10, height=6, useDingbats=FALSE)
+snvs.dens.ratio.plot.5
+dev.off()
+```
+
+## Mutation rates at origins
+
+Perform mutational burden analysis, corrected for base composition, at origins stratified by cancer types.
+
+We consider only cancer types figuring on previous analysis
+
+Corrected mutation rates are computed by adding the GC>AT and AT>GC mutation rates.
+
+```{r, eval = F}
+# r
+library(tidyr)
+
+# Define cancer types
+cancer.projects <- tibble(cancer.projects = unique(ICGC.snvs.closest.ori.10kb.df$V6))
+# Select projects
+filter <- (snvs.dens.ratio.df %>% filter(snvs.count >= 5000))$cancer.type # 1,056 donors
+# Prepare df
+cancer.types.df <- cancer.projects %>% separate(cancer.projects, c("cancer.type", "project"), sep = "-") %>% mutate(V6 = paste(cancer.type, project, sep = "-")) %>% filter(cancer.type %in% filter)
+# Add information to origin associated snsvs
+ICGC.snvs.closest.ori.type.df <- ICGC.snvs.closest.ori.10kb.df %>% left_join(cancer.types.df, by = "V6") %>% drop_na()
+# Compute total number of mutations per cancer types
+ICGC.snvs.count.type.df <- ICGC.snvs.closest.ori.type.df %>% group_by(cancer.type) %>% summarise(snvs.count=n())
+# Compute mutation rates per cancer types
+ICGC.snvs.ori.mut.rate.type.df <- ICGC.snvs.closest.ori.type.df %>% mutate(dist = -V14) %>%
+  mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 100)))-100)*100) %>% 
+  mutate(mut.type = ifelse((V4 == "G" | V4 == "C"), "GC", "AT")) %>% group_by(cancer.type, dist) %>%
+  summarise(GC.mut = sum(mut.type == "GC"), AT.mut = sum(mut.type == "AT")) %>%
+  right_join(ori.bc.summary, by = "dist") %>%
+  mutate(GC.rate = GC.mut/(G+C), AT.rate=AT.mut/(A+T), mut.rate = GC.rate+AT.rate) %>% 
+  mutate(mut.rate.fold=log2(mut.rate/mean(mut.rate[c(1:20,180:200)])))
+# Retained 20 cancer types
+# Assess variation of mutation rate at the center of origins
+ICGC.snvs.summary.type.df <- ICGC.snvs.ori.mut.rate.type.df %>% filter(dist == 0)
+# Define mutation rate quantiles
+ICGC.snvs.summary.type.df$MUT <- ntile(ICGC.snvs.summary.type.df$mut.rate.fold, 2)
+ICGC.snvs.summary.type.df$rank <- rank(ICGC.snvs.summary.type.df$mut.rate.fold)
+# Define groups of low, medium and high mutation rates
+type.low.df <- ICGC.snvs.summary.type.df %>% filter(MUT == 1)
+type.high.df <- ICGC.snvs.summary.type.df %>% filter(MUT == 2)
+# Prepare df
+ICGC.snvs.ori.low.mut.rate.type.df <- ICGC.snvs.ori.mut.rate.type.df %>% filter(cancer.type %in% type.low.df$cancer.type)
+ICGC.snvs.ori.high.mut.rate.type.df <- ICGC.snvs.ori.mut.rate.type.df %>% filter(cancer.type %in% type.high.df$cancer.type)
+# Save df
+saveRDS(ICGC.snvs.ori.mut.rate.type.df, "./001_Mut_density_Pan_cancer/rds/ICGC.snvs.ori.mut.rate.type.df.rds")
+saveRDS(ICGC.snvs.summary.type.df, "./001_Mut_density_Pan_cancer/rds/ICGC.snvs.summary.type.df.rds")
+saveRDS(ICGC.snvs.ori.low.mut.rate.type.df, "./001_Mut_density_Pan_cancer/rds/ICGC.snvs.ori.low.mut.rate.type.df.rds")
+saveRDS(ICGC.snvs.ori.high.mut.rate.type.df, "./001_Mut_density_Pan_cancer/rds/ICGC.snvs.ori.high.mut.rate.type.df.rds")
+```
+
+Plot results
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+# Load df
+ICGC.snvs.summary.type.df <- readRDS("./001_Mut_density_Pan_cancer/rds/ICGC.snvs.summary.type.df.rds")
+ICGC.snvs.ori.low.mut.rate.type.df <- readRDS("./001_Mut_density_Pan_cancer/rds/ICGC.snvs.ori.low.mut.rate.type.df.rds")
+ICGC.snvs.ori.high.mut.rate.type.df <- readRDS("./001_Mut_density_Pan_cancer/rds/ICGC.snvs.ori.high.mut.rate.type.df.rds")
+
+# Define plotting colors
+colfunc <- colorRampPalette(c("#29235C", "#309B3E", "#FFDE00", "#BF0808"))
+# show_col(colfunc(20))
+colfunc.df <- cbind.data.frame(rank = c(1:20), color = colfunc(20)) %>% left_join((ICGC.snvs.summary.type.df %>% dplyr::select(cancer.type, rank))) %>% dplyr::select(cancer.type, color)
+
+# Plot cancers with high mutation rates
+ICGC.snvs.ori.high.mut.rate.type.df.2 <- ICGC.snvs.ori.high.mut.rate.type.df %>% left_join(colfunc.df, by = "cancer.type")
+ICGC.snvs.ori.high.mut.rate.type.plot <- ICGC.snvs.ori.high.mut.rate.type.df.2 %>%  
+  ggplot(aes(x=dist, y=mut.rate.fold)) + geom_line(aes(color=color)) +
+  scale_color_identity(name = "Cancer type", breaks = ICGC.snvs.ori.high.mut.rate.type.df.2$color, labels = ICGC.snvs.ori.high.mut.rate.type.df.2$cancer.type, guide = "legend") +
+  xlim(-5000,5000) + ylim(-1.5,2.0) +
+  xlab("Distance from origin (bp)") + ylab("Mutation rate (log2 FC from background)") + ggtitle("snvs mutation rate at origins") +
+  geom_hline(yintercept=0, linetype="dashed") + 
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.snvs.ori.high.mut.rate.type.plot
+
+# Plot cancers with low mutation rates
+ICGC.snvs.ori.low.mut.rate.type.df.2 <- ICGC.snvs.ori.low.mut.rate.type.df %>% left_join(colfunc.df, by = "cancer.type")
+ICGC.snvs.ori.low.mut.rate.type.plot <- ICGC.snvs.ori.low.mut.rate.type.df.2 %>%  
+  ggplot(aes(x=dist, y=mut.rate.fold)) + geom_line(aes(color=color)) +
+  scale_color_identity(name = "Cancer type", breaks = ICGC.snvs.ori.low.mut.rate.type.df.2$color, labels = ICGC.snvs.ori.low.mut.rate.type.df.2$cancer.type, guide = "legend") +
+  xlim(-5000,5000) + ylim(-1.5,2.0) +
+  xlab("Distance from origin (bp)") + ylab("Mutation rate (log2 FC from background)") + ggtitle("snvs mutation rate at origins") +
+  geom_hline(yintercept=0, linetype="dashed") + 
+  theme_bw() + theme(aspect.ratio=1.0, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.snvs.ori.low.mut.rate.type.plot
+
+pdf("./Rplots/ICGC.snvs.ori.mut.rate.type.plot.pdf", width=10, height=6, useDingbats=FALSE)
+ggarrange(ICGC.snvs.ori.high.mut.rate.type.plot, ICGC.snvs.ori.low.mut.rate.type.plot, ncol = 2)
+dev.off()
+```
+
+# Characterisation of structural variations
+
+## Correlations between SVs and snvs burden at origins
+
+The density of SVs at origins (+- 500bp) for genomes with more than 5,000 snvs is computed
+
+```{r, eval = F}
+# r
+library(tidyr)
+
+# Load snvs density ratio df
+snvs.dens.ratio.df <- readRDS("./001_Mut_density_Pan_cancer/rds/snvs.dens.ratio.df.rds") %>% distinct()
+
+# Open ori and flank coordinates
+ori.1kb.domains.gr <- import("./Dataset/ori/BED/ori.1kb.hg19.bed")
+ori.flanks.gr <- import("./Dataset/ori/BED/ori.flanks.hg19.bed")
+
+# Load SV manisfest
+SV.manifest.df <- read.table(gzfile("./Dataset/ICGC/SV/manifest.1698320954196.tar.gz"), skip = 1)
+SV.manifest.df <- SV.manifest.df %>% dplyr::select(V9, V10, V2, V3, V5)
+colnames(SV.manifest.df) <- c("donor.id", "project", "file.id", "object.id", "file.name")
+
+# List SV vcf files
+vcf.SV.files <- list.files("./Dataset/ICGC/SV/VCF/") # 3,822 files
+vcf.SV.files <- vcf.SV.files[!grepl(".idx", vcf.SV.files)] # 1,911 SV vcf files
+vcf.SV.filter.files <- vcf.SV.files[vcf.SV.files %in% SV.manifest.df$file.name] # 1,911 SV vcf files, CHECK OK
+
+# Compute SV counts
+SV.dens.ratio.df <- tibble()
+for (i in 1:length(vcf.SV.filter.files)) {
+vcf.SV.files.i <- vcf.SV.filter.files[i]
+print(vcf.SV.files.i) 
+df.i <- SV.manifest.df %>% filter(file.name == vcf.SV.files.i)
+  donor.i <- df.i$donor.id
+path.i <- paste("./Dataset/ICGC/SV/VCF/", vcf.SV.files.i, sep = "")
+vcf.i <- read.table(gzfile(path.i), comment.char = "#") %>% dplyr::select(V1, V2)
+  count.i <- nrow(vcf.i)
+bed.i <- vcf.i %>% mutate(end = V2 + 1) %>% dplyr::select(seqnames = V1, start = V2, end)
+gr.i <- makeGRangesFromDataFrame(bed.i)
+  ori.SV.overlap.i <- subsetByOverlaps(gr.i, ori.1kb.domains.gr)
+    SV.ori.count.i <- (length(ori.SV.overlap.i)*1000)/9340000
+  flanks.SV.overlap.i <- subsetByOverlaps(gr.i, ori.flanks.gr)
+    SV.flanks.count.i <- (length(flanks.SV.overlap.i)*1000)/177441320
+SV.df.summary.i <- cbind.data.frame(donor = donor.i, SV.count = count.i, SV.dens.ori = SV.ori.count.i, SV.dens.flanks = SV.flanks.count.i) %>% mutate(SV.dens.ratio = SV.dens.ori/SV.dens.flanks)
+SV.dens.ratio.df <- rbind(SV.dens.ratio.df,SV.df.summary.i)
+}
+plot(log10(SV.dens.ratio.df$SV.count), SV.dens.ratio.df$SV.dens.ratio)
+saveRDS(SV.dens.ratio.df, "./001_Mut_density_Pan_cancer/rds/SV.dens.ratio.df.rds")
+
+# Add SV information to snvs density ratio information
+snvs.SV.dens.ratio.df <- snvs.dens.ratio.df %>% distinct() %>% full_join(SV.dens.ratio.df, by = "donor") %>% distinct()
+saveRDS(snvs.SV.dens.ratio.df, "./001_Mut_density_Pan_cancer/rds/snvs.SV.dens.ratio.df.rds")
+```
+
+Analyse results
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+
+# Load snvs density ratio df
+snvs.SV.dens.ratio.df <- readRDS("./001_Mut_density_Pan_cancer/rds/snvs.SV.dens.ratio.df.rds") %>% drop_na()
+
+# Assess the distribution of SV density stratified by primary sites
+snvs.SV.dens.ratio.plot <- snvs.SV.dens.ratio.df %>%
+  ggplot(aes(x=reorder(Primary.Site,-log1p(SV.dens.ratio), na.rm=T), y=log1p(SV.dens.ratio), fill="#E41F1A", alpha = 0.3)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5) +
+  geom_jitter(color="black", size=0.4, alpha=0.4) + ylab("SV density ratio (ori/flanks, log1p scale)") +
+  geom_hline(yintercept=0.69, linetype="dashed") +
+  theme_bw() + theme(aspect.ratio=0.4, panel.grid.minor = element_line(linetype = "dotted"), legend.position = "none", axis.title.x=element_blank(), axis.text.x=element_text(angle=45,hjust=1))
+snvs.SV.dens.ratio.plot
+
+# Assess the correlation between snvs and SV density ratio
+snvs.SV.dens.ratio.clean.df <- snvs.SV.dens.ratio.df %>% filter(snvs.dens.ratio > 0 & SV.dens.ratio > 0 & SV.dens.ratio != "Inf")
+snvs.SV.dens.ratio.plot.2 <- snvs.SV.dens.ratio.clean.df %>% 
+  ggplot(aes(x=log1p(snvs.dens.ratio), y=log1p(SV.dens.ratio))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method=  "lm", se = T) +
+  geom_hline(yintercept=0.69, linetype="dashed") + geom_vline(xintercept=0.69, linetype="dashed") +
+  xlab("Mutation density ratio (ori/flanks, log1p scale)") + ylab("SV density ratio (ori/flanks, log1p scale)") + ggtitle("Rho = 0.2592406, Pval < 2.2e-16") +
+  theme_bw() + theme(aspect.ratio=1, panel.grid.minor = element_line(linetype = "dotted"))
+snvs.SV.dens.ratio.plot.2
+
+cor.test(snvs.SV.dens.ratio.clean.df$snvs.dens.ratio, snvs.SV.dens.ratio.clean.df$SV.dens.ratio)
+# Rho = 0.2592406, Pval < 2.2e-16
+
+pdf("./Rplots/SV.snvs.cor.pancancer.pdf", width=7, height=6, useDingbats=FALSE)
+snvs.SV.dens.ratio.plot.2
+dev.off()
+```
+
+## Origin-associated SVs characterisation
+
+Convert SV vcf into annotated gr objects
+
+```{r, eval = F}
+# r
+source("./Scripts/SV_annotation.R")
+library(StructuralVariantAnnotation)
+
+# Load SV manisfest
+SV.manifest.df <- read.table(gzfile("./Dataset/ICGC/SV/manifest.1698320954196.tar.gz"), skip = 1)
+SV.manifest.df <- SV.manifest.df %>% dplyr::select(V9, V10, V2, V3, V5)
+colnames(SV.manifest.df) <- c("donor.id", "project", "file.id", "object.id", "file.name")
+
+# List SV vcf files
+vcf.SV.files <- list.files("./Dataset/ICGC/SV/VCF/") # 3,822 files
+vcf.SV.files <- vcf.SV.files[!grepl(".idx", vcf.SV.files)] # 1,911 SV vcf files
+vcf.SV.filter.files <- vcf.SV.files[vcf.SV.files %in% SV.manifest.df$file.name] # 1,911 SV vcf files, CHECK OK
+
+# Annotate and save gr objects
+for (i in 1:length(vcf.SV.filter.files)) {
+vcf.SV.files.i <- vcf.SV.filter.files[i]  
+print(i)
+df.i <- SV.manifest.df %>% filter(file.name == vcf.SV.files.i)
+  donor.i <- df.i$donor.id
+path.i <- paste("./Dataset/ICGC/SV/VCF/", vcf.SV.files.i, sep = "")
+vcf.i <- readVcf(path.i, "hg19")
+gr.i <- breakpointRanges(vcf.i)
+event.gr.i <- simpleEventType(gr.i)
+gr.i$svtype <- event.gr.i
+path.out.i <- paste0("./Dataset/ICGC/SV/annoGR/", donor.i, ".annoSV.gr.rds")
+saveRDS(gr.i, path.out.i)
+}
+```
+
+Compute the distribution of SV types at the vicinity of replication origins
+
+```{r, eval = F}
+# r
+
+# Load origin coordinates
+ori.center.df <- read.table("./Dataset/ori/ori.inter.hg19.NCBI.bed") %>% dplyr::select(V1, V2, V3)
+colnames(ori.center.df) <- c("seqnames", "start", "end")
+ori.center.gr <- makeGRangesFromDataFrame(ori.center.df)
+
+# List SV annotated gr files
+annoGR.SV.files <- list.files("./Dataset/ICGC/SV/annoGR/") # 1,794 files
+annoGR.SV.donor <- str_replace(annoGR.SV.files, ".annoSV.gr.rds", "")
+path.SV.files <- paste0("./Dataset/ICGC/SV/annoGR/", annoGR.SV.files)
+
+# Compute distances from each SV to the closest origins
+# SV at more than +-10 kb of an origin are filtered out
+annoSV.ori.dist.df <- tibble()
+for (i in 1:length(annoGR.SV.files)) {
+  print(i/length(annoGR.SV.files))
+  gr.i <- readRDS(path.SV.files[i])
+  donor.i <- annoGR.SV.donor[i]
+  nearest.i <- nearest(gr.i, ori.center.gr)
+  nearest.ori.i <- start(ori.center.gr[nearest.i])
+  df.i <- as.data.frame(gr.i) %>% dplyr::select(seqnames, start, end, REF, ALT, svtype, svLen, insLen)
+  df.i <- df.i %>% mutate(nearest.ori.i = nearest.ori.i, dist.ori = start - nearest.ori.i, donor = donor.i) %>%
+                  filter(dist.ori >= -10000 & dist.ori <= 10000) %>% dplyr::select(-nearest.ori.i)
+  rownames(df.i) <- NULL
+  annoSV.ori.dist.df <- rbind(annoSV.ori.dist.df, df.i)  
+}
+
+saveRDS(annoSV.ori.dist.df, "./001_Mut_density_Pan_cancer/rds/annoSV.ori.dist.df.rds")
+# 83,659 SVs
+```
+
+Analyse origin-associated SV
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(ggpubr)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+
+# Load results
+annoSV.ori.dist.df <- readRDS("./001_Mut_density_Pan_cancer/rds/annoSV.ori.dist.df.rds")
+
+# Plot the distribution of small SV type in the vicinity of origins
+# Compute the distances in bins of 100 nt
+
+annoSV.ori.dist.summary.df <- annoSV.ori.dist.df %>% mutate(dist = (as.numeric(cut(dist.ori, breaks = seq(-10000, 10000, 100)))-100)*100) %>%
+          group_by(dist, svtype) %>% summarise(count = n()) %>% group_by(dist) %>% mutate(freq=count/sum(count))
+
+annoSV.ori.dist.summary.plot <- annoSV.ori.dist.summary.df %>% mutate(SV = fct_relevel(svtype, "INV", "DUP", "DEL", "ITX", "INS")) %>% 
+  ggplot(aes(x = dist, y = freq)) +
+  geom_col(aes(fill = SV), width = 100, alpha = 0.8) + xlim(-5000,5000) +
+  scale_fill_manual(values = c("#D4D2D2", "#BF0808", "#4F4A75", "#EAA813", "#94C994")) +
+  xlab("Distance from origin (bp)") + ylab("Relative contribution") +
+  theme_classic() + theme(aspect.ratio=1)
+annoSV.ori.dist.summary.plot
+
+# Tandem duplication characterisation
+
+# Recover duplication at origins and flanks
+
+SD.ori.df <- annoSV.ori.dist.df %>% filter(dist.ori >= -500 & dist.ori <= 500) %>% filter(svtype == "DUP") %>% mutate(class = "ori") # 1,445 SVs
+SD.flanks.df <- annoSV.ori.dist.df %>% filter(dist.ori < -500 | dist.ori > 500) %>% filter(svtype == "DUP") %>% mutate(class = "flanks") # 12,295 SVs
+SD.summary.df <- rbind(SD.ori.df, SD.flanks.df)
+
+SD.summary.plot <- SD.summary.df %>% 
+  ggplot(aes(x=class, y=svLen, alpha = 0.3)) +
+  geom_boxplot(width = 0.5, fill="#D56114") +
+  scale_y_continuous(trans = log10_trans(), limits=c(10,100000)) + ylab("Tandem duplication length (bb)") + ggtitle("Pval < 2.2e-16") +
+  theme_bw() + theme(aspect.ratio=2, panel.grid.minor = element_line(linetype = "dotted"), legend.position = "none", axis.title.x=element_blank(), axis.text.x=element_text(angle=45,hjust=1))
+SD.summary.plot
+
+# Compute stats
+ks.test(SD.ori.df$svLen, SD.flanks.df$svLen) # p-value < 2.2e-16
+
+# Save plot
+pdf("./Rplots/SV.annotation.pancancer.pdf", width=12, height=6, useDingbats=FALSE)
+ggarrange(annoSV.ori.dist.summary.plot, SD.summary.plot, nrow = 1)
+dev.off()
+```
+
+## SV signatures
+
+SV signatures are computed following the nomenclature introduced in Li et al. Nature 2020, 578, 112-121 (https://www.nature.com/articles/s41586-019-1913-9). We consider each type of SV binned in 8 length intervals. Interchromosomal/translocation are counted without considering segment length.
+
+```{r, eval = F}
+# r
+
+# Load results
+annoSV.ori.dist.df <- readRDS("./001_Mut_density_Pan_cancer/rds/annoSV.ori.dist.df.rds")
+
+unique(annoSV.ori.dist.df$svtype)
+# "ITX" "DUP" "INV" "DEL" "INS"
+
+# Define length ranges
+SV.sig.df <- annoSV.ori.dist.df %>%
+  mutate(svlength = case_when(svtype != "ITX" & abs(svLen) >= 0 & abs(svLen) <= 100 ~ "0-0.1kb",
+                              svtype != "ITX" & abs(svLen) > 100 & abs(svLen) <= 500 ~ "0.1-0.5kb",
+                              svtype != "ITX" & abs(svLen) > 500 & abs(svLen) <= 1000 ~ "0.5-1kb",
+                              svtype != "ITX" & abs(svLen) > 1000 & abs(svLen) <= 5000 ~ "1-5kb",
+                              svtype != "ITX" & abs(svLen) > 5000 & abs(svLen) <= 10000 ~ "5-10kb",
+                              svtype != "ITX" & abs(svLen) > 10000 & abs(svLen) <= 100000 ~ "10-100kb",
+                              svtype != "ITX" & abs(svLen) > 100000 & abs(svLen) <= 1000000 ~ "0.1-1Mb",
+                              svtype != "ITX" & abs(svLen) > 1000000 ~ ">1Mb",
+                              svtype == "ITX" ~ "ITX",
+                              T ~ NA)) %>% filter(svlength != "NA")
+
+# Prepare empty table
+intervals <- c("0-0.1kb", "0.1-0.5kb", "0.5-1kb", "1-5kb", "5-10kb", "10-100kb", "0.1-1Mb", ">1Mb")
+SV.sig.init.df <- expand.grid(c("INS", "DEL", "DUP", "INV"), intervals)
+colnames(SV.sig.init.df) <- c("svtype", "svlength")
+SV.sig.init.df <- rbind(SV.sig.init.df, cbind(svtype = "ITX", svlength = "ITX")) 
+
+# Recover origin associated signatures
+SV.sig.ori.df <- SV.sig.df %>% filter(dist.ori >= -500 & dist.ori <= 500) %>% group_by(svtype, svlength) %>% summarise(count = n()) %>%
+  right_join(SV.sig.init.df, by = c("svtype", "svlength")) %>% ungroup() %>% mutate(freq = count/sum(count, na.rm = T)) %>% select(-count)
+SV.sig.ori.df[is.na(SV.sig.ori.df)] <- 0
+saveRDS(SV.sig.ori.df, "./001_Mut_density_Pan_cancer/rds/SV.sig.ori.df.rds")
+
+# Recover flanks associated signatures
+SV.sig.flanks.df <- SV.sig.df %>% filter(dist.ori <= -500 | dist.ori >= 500) %>% group_by(svtype, svlength) %>% summarise(count = n()) %>%
+  right_join(SV.sig.init.df, by = c("svtype", "svlength")) %>% ungroup() %>% mutate(freq = count/sum(count, na.rm = T)) %>% select(-count)
+SV.sig.flanks.df[is.na(SV.sig.flanks.df)] <- 0
+saveRDS(SV.sig.flanks.df, "./001_Mut_density_Pan_cancer/rds/SV.sig.flanks.df.rds")
+```
+
+Plot
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(ggpubr)
+setwd("/Volumes/cephfs2/pmurat/OriCan")
+
+# Load results
+SV.sig.ori.df <- readRDS("./001_Mut_density_Pan_cancer/rds/SV.sig.ori.df.rds")
+SV.sig.flanks.df <- readRDS("./001_Mut_density_Pan_cancer/rds/SV.sig.flanks.df.rds")
+
+# Plot
+
+SV.sig.ori.plot <- SV.sig.ori.df %>%
+  mutate(SVlength = fct_relevel(svlength, "0-0.1kb", "0.1-0.5kb", "0.5-1kb", "1-5kb", "5-10kb", "10-100kb", "0.1-1Mb", ">1Mb")) %>%
+  mutate(SVtype = fct_relevel(svtype, "INS", "DEL", "DUP", "INV", "ITX")) %>% 
+  ggplot(aes(x = SVlength, y = freq, fill = SVtype, width = 1)) +
+  geom_bar(stat = "identity", colour = "black", size = .2) + ylim(0,0.17) + ylab("Probability") + xlab("SV types") +
+  scale_fill_manual(values = c("#94C994", "#4F4A75", "#BF0808", "#D4D2D2", "#EAA813")) +
+  theme_bw() + facet_grid(.~SVtype, space = "free", scales = "free_x") 
+
+SV.sig.flanks.plot <- SV.sig.flanks.df %>%
+  mutate(SVlength = fct_relevel(svlength, "0-0.1kb", "0.1-0.5kb", "0.5-1kb", "1-5kb", "5-10kb", "10-100kb", "0.1-1Mb", ">1Mb")) %>%
+  mutate(SVtype = fct_relevel(svtype, "INS", "DEL", "DUP", "INV", "ITX")) %>% 
+  ggplot(aes(x = SVlength, y = freq, fill = SVtype, width = 1)) +
+  geom_bar(stat = "identity", colour = "black", size = .2) + ylim(0,0.17) + ylab("Probability") +
+  scale_fill_manual(values = c("#94C994", "#4F4A75", "#BF0808", "#D4D2D2", "#EAA813")) +
+  theme_bw() + facet_grid(.~SVtype, space = "free", scales = "free_x") 
+
+ggarrange(SV.sig.ori.plot, SV.sig.flanks.plot, nrow = 2)
+
+# Save plot
+pdf("./Rplots/SV.signatures.pdf", width=6, height=6, useDingbats=FALSE)
+ggarrange(SV.sig.ori.plot, SV.sig.flanks.plot, nrow = 2)
+dev.off()
+```
+
+
+
+
+
+
+
+

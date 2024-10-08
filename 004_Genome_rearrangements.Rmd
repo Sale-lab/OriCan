@@ -1,0 +1,787 @@
+---
+title: "Replication mediated genome rearrangements"
+author: "Pierre Murat"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_collapsed: yes
+    toc_depth: 3
+    number_sections: yes
+    theme: lumen
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+This notebook reports the characterisation of origin-driven genome rearrangements and their consequences.
+
+The previous sections demonstrate that PACA cluster 1 are characterised by a down regulation of G1/S and G2/M checkpoints and DNA break repair. These observations suggest the accumulation of SVs and CNVs breakpoints at origins of PACA 1 genomes.
+
+We then focus on strutural variants (insertion & deletion >= 200bp). We distinguish between structural variants (SSVs) and copy number variants (CNVs). SSVs are supported by break ends. CNVs are mapped by conventional copy number ratio analysis.
+
+# Somatic structural variations in PACA cancer
+
+This section focuses on structural variants supported by break end sequencing in cancer genomes.
+Because the number of SVs mapped per genome is small, we further characterise pan cancer trends. Part of the analysis is reported in 001_Mut_density_Pan_cancer_vX_X.Rmd
+
+## SV distibution at PACA origins
+
+```{r, eval = F}
+# r
+
+# Load SV coordinates with precomputed distances to origins
+ICGC.SV.closest.ori.10kb.df <- read.table("./001_Mut_density_Pan_cancer/ICGC.SV.closest.ori.10kb.bed")
+colnames(ICGC.SV.closest.ori.10kb.df) <- c("seqnames", "start", "end", "SV.id", "REF", "ALT", "SV.class", "donor", "project", "ori.seqnames", "ori.start", "ori.end", "EFF", "ori.id", "dist")
+# distances are inverted
+ICGC.SV.closest.ori.10kb.df$dist <- ICGC.SV.closest.ori.10kb.df$dist
+
+# Load PACA cluster information
+PACA.clusters.summary.df <- readRDS(file = "./003_Transcriptomics_cluster_analysis/rds/PACA.clusters.summary.df.rds")
+
+# Filter SVs
+PACA.SV.cluster.1.ori.10kb.df <- ICGC.SV.closest.ori.10kb.df %>% filter(donor %in% (PACA.clusters.summary.df %>% filter(cluster == "clust.1"))$donor) # 815 SVs
+PACA.SV.cluster.2.ori.10kb.df <- ICGC.SV.closest.ori.10kb.df %>% filter(donor %in% (PACA.clusters.summary.df %>% filter(cluster == "clust.2"))$donor) # 1172 SVs
+PACA.SV.cluster.3.ori.10kb.df <- ICGC.SV.closest.ori.10kb.df %>% filter(donor %in% (PACA.clusters.summary.df %>% filter(cluster == "clust.3"))$donor) # 10703 SVs
+
+# Plot distribution of SVs around origins
+# Because the data is noisy, due to the small number of SVs mapped, we count in bins of 200 bp
+
+PACA.SV.cluster.1.ori.10kb.summary.df <- PACA.SV.cluster.1.ori.10kb.df %>% mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 200)))-50)*200) %>%
+  group_by(dist) %>% summarise(SV.count=n()) %>% mutate(cluster = "clust.1") %>% mutate(SV.FC = SV.count/mean(SV.count[c(1:20,180:200)], na.rm = T))
+PACA.SV.cluster.2.ori.10kb.summary.df <- PACA.SV.cluster.2.ori.10kb.df %>% mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 200)))-50)*200) %>%
+  group_by(dist) %>% summarise(SV.count=n()) %>% mutate(cluster = "clust.2") %>% mutate(SV.FC = SV.count/mean(SV.count[c(1:20,180:200)], na.rm = T))
+PACA.SV.cluster.3.ori.10kb.summary.df <- PACA.SV.cluster.3.ori.10kb.df %>% mutate(dist = (as.numeric(cut(dist, breaks = seq(-10000, 10000, 200)))-50)*200) %>%
+  group_by(dist) %>% summarise(SV.count=n()) %>% mutate(cluster = "clust.3") %>% mutate(SV.FC = SV.count/mean(SV.count[c(1:20,180:200)], na.rm = T))
+PACA.SV.cluster.ori.10kb.summary.df <- rbind(PACA.SV.cluster.1.ori.10kb.summary.df, PACA.SV.cluster.2.ori.10kb.summary.df, PACA.SV.cluster.3.ori.10kb.summary.df)
+saveRDS(PACA.SV.cluster.ori.10kb.summary.df, file = "./004_Genome_rearrangements/rds/PACA.SV.cluster.ori.10kb.summary.df.rds")
+```
+
+Plot
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(ggplot2)
+setwd("/Users/pm23/Desktop/Projects/OriCan")
+
+PACA.SV.cluster.ori.10kb.summary.df <- readRDS(file = "./004_Genome_rearrangements/rds/PACA.SV.cluster.ori.10kb.summary.df.rds")
+PACA.SV.cluster.ori.10kb.summary.plot <- PACA.SV.cluster.ori.10kb.summary.df %>%
+  ggplot(aes(x = dist, y = SV.FC , color = cluster)) +
+  geom_line() + xlim(-5000,5000) + #ylim(0.4, 4) +
+  scale_color_manual(values = c("#E4221E", "#F39208", "#504B76")) +
+  geom_hline(yintercept=1, linetype="dashed") +
+  xlab("Distance from origins (bp)") + ylab("Structural variant enrichement (FC)") +
+  theme_bw() + theme(aspect.ratio=1, panel.grid.minor = element_line(linetype = "dotted"))
+PACA.SV.cluster.ori.10kb.summary.plot
+
+pdf("./Rplots/PACA.SV.cluster.enrichment.pdf", width=10, height=6, useDingbats=FALSE)
+PACA.SV.cluster.ori.10kb.summary.plot
+dev.off() 
+```
+
+## SV enrichement at G4s
+
+Map SV break ends associated to tandem duplication at G-quadruplexes.
+Due to the limited number of SV in PACA, we consider all mapped SVs.
+
+```{r, eval = F}
+# r
+
+# Recover coordinates of the duplicated fragments
+ICGC.DUP.df <- annoSV.ori.dist.df %>% filter(svtype == "DUP") # 13,740 events
+ICGC.DUP.df <- ICGC.DUP.df[grepl("]", ICGC.DUP.df$ALT),] # 6,873 events
+# orient fragments
+ICGC.DUP.df <- ICGC.DUP.df %>%
+  mutate(start.oriented = case_when(dist.ori <= 0 ~ start, dist.ori >= 0 ~ end), end.oriented = start.oriented+1) %>%
+  dplyr::select(seqnames, start = start.oriented, end = end.oriented, REF, ALT, donor)
+ICGC.DUP.gr <- makeGRangesFromDataFrame(ICGC.SV.df, keep.extra.columns = T) # 13,740 SVs
+seqlevelsStyle(ICGC.DUP.gr) <- "UCSC"
+
+# Compute distances to G4 either at origins or in the flanks
+# G4 are also oriented
+
+# Load G4 distances information for G4s at origin domain
+G4.ori.dist.gr <- readRDS(file = "./002_Mut_signatures_Pan_cancer/rds/G4.ori.dist.gr.rds")
+
+# Compute G4 distances for G4 at origin flanks
+G4.score.flanks.gr <- readRDS(file = "./002_Mut_signatures_Pan_cancer/rds/G4.score.flanks.filter.gr.rds")
+
+G4.flanks.dist <- nearest(G4.score.flanks.gr, ori.inter.dist.gr)
+flanks.dist.gr <- ori.inter.dist.gr[G4.flanks.dist]
+G4.flanks.dist.gr <- as.data.frame(G4.score.flanks.gr) %>% mutate(flanks.pos = start(flanks.dist.gr), flanks.dist = start-flanks.pos) %>%
+  mutate(flanks.pos = case_when(flanks.dist <= 0 ~ "upstream", T ~ "downtream")) %>%
+  mutate(rep.strand = case_when((flanks.pos == "upstream" & class == "G4") ~ "leading",
+                                (flanks.pos == "downtream" & class == "C4") ~ "leading",
+                                T ~ "lagging")) %>% 
+  makeGRangesFromDataFrame(keep.extra.columns = T)
+saveRDS(G4.flanks.dist.gr, file = "./002_Mut_signatures_Pan_cancer/rds/G4.flanks.dist.gr.rds")
+
+# Compute break end distances to G4s
+
+# At origins
+ICGC.DUP.G4.ori.dist <- nearest(ICGC.DUP.gr, G4.ori.dist.gr)
+G4.start <- start(G4.ori.dist.gr[ICGC.DUP.G4.ori.dist])+7
+G4.end <- end(G4.ori.dist.gr[ICGC.DUP.G4.ori.dist])-7
+G4.ori.dist <- G4.ori.dist.gr[ICGC.DUP.G4.ori.dist]$ori.dist
+G4.class <- G4.ori.dist.gr[ICGC.DUP.G4.ori.dist]$class
+ICGC.DUP.G4.ori.dist.df <- cbind.data.frame(as.data.frame(ICGC.DUP.gr), G4.start, G4.end, G4.ori.dist, G4.class) %>% 
+  mutate(G4.DUP.dist = case_when(G4.ori.dist < 0 ~ G4.end-start,
+                                G4.ori.dist > 0 ~ G4.start-start)) %>% filter(G4.DUP.dist >= -1000 & G4.DUP.dist <= 1000)
+saveRDS(ICGC.DUP.G4.ori.dist.df, file = "./004_Genome_rearrangements/rds/ICGC.DUP.G4.ori.dist.df.rds")
+
+# At origin flanks
+ICGC.DUP.G4.flanks.dist <- nearest(ICGC.DUP.gr, G4.flanks.dist.gr)
+G4.start <- start(G4.flanks.dist.gr[ICGC.DUP.G4.flanks.dist])+7
+G4.end <- end(G4.flanks.dist.gr[ICGC.DUP.G4.flanks.dist])-7
+G4.ori.dist <- G4.flanks.dist.gr[ICGC.DUP.G4.flanks.dist]$flanks.dist
+G4.class <- G4.flanks.dist.gr[ICGC.DUP.G4.flanks.dist]$class
+ICGC.DUP.G4.flanks.dist.df <- cbind.data.frame(as.data.frame(ICGC.DUP.gr), G4.start, G4.end, G4.ori.dist, G4.class) %>% 
+  mutate(G4.DUP.dist = case_when(G4.ori.dist < 0 ~ G4.end-start,
+                                G4.ori.dist > 0 ~ G4.start-start)) %>% filter(G4.DUP.dist >= -1000 & G4.DUP.dist <= 1000)
+saveRDS(ICGC.DUP.G4.flanks.dist.df, file = "./004_Genome_rearrangements/rds/ICGC.DUP.G4.flanks.dist.df.rds")
+```
+
+Plot
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+setwd("/Users/pm23/Desktop/Projects/OriCan")
+
+ICGC.DUP.G4.ori.dist.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.DUP.G4.ori.dist.df.rds")
+ICGC.DUP.G4.flanks.dist.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.DUP.G4.flanks.dist.df.rds")
+
+DUP.G4.ori.dist.plot <- ICGC.DUP.G4.ori.dist.df %>% ggplot(aes(x=G4.DUP.dist)) +
+  geom_histogram(binwidth=5, fill="#D56014", color="#010101", linewidth = 0.25) + xlab("Distance from G4 (nt)") + ylab("Break ends count") + xlim(-250,250) + ylim(0, 125) +
+  theme_bw() + theme(aspect.ratio=0.5, panel.grid.minor = element_line(linetype = "dotted")) + ggtitle("At origins, n = 69914")
+
+DUP.G4.flanks.dist.plot <- ICGC.DUP.G4.flanks.dist.df %>% ggplot(aes(x=G4.DUP.dist)) +
+  geom_histogram(binwidth=5, fill="#504B76", color="#010101", linewidth = 0.25) + xlab("Distance from G4 (nt)") + ylab("Break ends count") + xlim(-250,250) + ylim(0, 125) +
+  theme_bw() + theme(aspect.ratio=0.5, panel.grid.minor = element_line(linetype = "dotted")) + ggtitle("At origin flankss, n = 179962")
+
+pdf("./Rplots/SV.break.ends.G4.pdf", width=8, height=6, useDingbats=FALSE)
+ggarrange(DUP.G4.ori.dist.plot, DUP.G4.flanks.dist.plot, nrow = 2, ncol = 1)
+dev.off() 
+```
+
+Assess the nature of breakpoints
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(ggplot2)
+setwd("/Users/pm23/Desktop/Projects/OriCan")
+
+ICGC.DUP.G4.ori.dist.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.DUP.G4.ori.dist.df.rds")
+ICGC.DUP.G4.flanks.dist.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.DUP.G4.flanks.dist.df.rds")
+
+# At origins
+ICGC.DUP.ori.BND.df <- ICGC.DUP.G4.ori.dist.df %>% 
+                                   mutate(BND = case_when(G4.class == "C4" & REF =="G" ~ "C",
+                                                          G4.class == "C4" & REF =="C" ~ "G",
+                                                          G4.class == "C4" & REF =="A" ~ "T",
+                                                          G4.class == "C4" & REF =="T" ~ "A",
+                                                          T ~ REF))
+ICGC.DUP.ori.table <- as.data.frame(table(ICGC.DUP.ori.BND.df$BND))
+colnames(ICGC.DUP.ori.table) <- c("BND", "count")
+ICGC.DUP.ori.table <- ICGC.DUP.ori.table %>% mutate(freq = count/sum(count), class = "ori")
+
+# At flanks
+ICGC.DUP.flanks.BND.df <- ICGC.DUP.G4.flanks.dist.df %>% 
+                                   mutate(BND = case_when(G4.class == "C4" & REF =="G" ~ "C",
+                                                          G4.class == "C4" & REF =="C" ~ "G",
+                                                          G4.class == "C4" & REF =="A" ~ "T",
+                                                          G4.class == "C4" & REF =="T" ~ "A",
+                                                          T ~ REF))
+ICGC.DUP.flanks.table <- as.data.frame(table(ICGC.DUP.flanks.BND.df$BND))
+  colnames(ICGC.DUP.flanks.table) <- c("BND", "count")
+ICGC.DUP.flanks.table <- ICGC.DUP.flanks.table %>% mutate(freq = count/sum(count), class = "flanks")
+
+# Combine results
+ICGC.DUP.BND.table <- rbind(ICGC.DUP.ori.table, ICGC.DUP.flanks.table)
+
+# Plot
+ICGC.DUP.BND.table.plot <- ICGC.DUP.BND.table %>% ggplot(aes(fill=BND, y=freq, x=class)) + 
+  geom_bar(position="stack", stat="identity") + ylab("Frequency") +
+  scale_fill_manual(values = c("#E73458", "#6FAA93", "#FAB967", "#32B9EC")) +
+  theme_bw() + theme(aspect.ratio=2, panel.grid.minor = element_line(linetype = "dotted"), axis.title.x=element_blank(), axis.text.x=element_text(angle=45,hjust=1))
+ICGC.DUP.BND.table.plot
+
+pdf("./Rplots/ICGC.DUP.BND.table.plot.pdf", width=7, height=6, useDingbats=FALSE)
+ICGC.DUP.BND.table.plot
+dev.off()
+```
+
+## Functional characterisation of tandem duplication events
+
+This section aims to assess the overlap of duplicated regions with genes and CRE.
+
+```{r, eval = F}
+# r
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+
+# Recover the coordinates of duplicated segments at origins
+DUP.ori.df <- annoSV.ori.dist.df %>% filter(svtype == "DUP") %>% filter(dist.ori  >= -500 & dist.ori  <= 500)
+DUP.ori.gr <- makeGRangesFromDataFrame(DUP.ori.df, keep.extra.columns = T)
+seqlevelsStyle(DUP.ori.gr) <- "UCSC"
+
+# Identify closest genes
+hsapiens.coding.genes <- readRDS("./003_Transcriptomics_cluster_analysis/rds/hsapiens.coding.genes.rds")
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+hsapiens.genes.gr <- genes(txdb)
+hsapiens.coding.genes.gr <- hsapiens.genes.gr[hsapiens.genes.gr$gene_id %in% hsapiens.coding.genes$ncbi.gene.id]
+DUP.gene.nearest <- distanceToNearest(DUP.ori.gr, hsapiens.coding.genes.gr) 
+DUP.gene.nearest.df <- cbind.data.frame(as.data.frame(DUP.ori.gr), ncbi.gene.id = as.numeric(hsapiens.coding.genes.gr[subjectHits(DUP.gene.nearest)]$gene_id), dist = DUP.gene.nearest@elementMetadata$distance) %>% left_join(hsapiens.coding.genes, by = "ncbi.gene.id")
+saveRDS(DUP.gene.nearest.df, file = "./004_Genome_rearrangements/rds/DUP.gene.nearest.df.rds")
+```
+
+The previous analysis reveals tandem duplication of sequences of functional interest. For example:
+- a 40 nt long sequence at 92 nt upstream of the ESR2 (Estrogen receptor) gene in PACA1.
+- a 105 nt long sequence in the first intron of MYC for DO27769 (MALY-DE).
+- a 112 nt long sequence in the first intron of TYK2 (tyrosine kinase - JAK) for DO35613 (PBCA-DE).
+
+# Somatic copy number alterations in PACA cancer
+
+This section focuses on characerising CNA in PACA genomes.
+
+## CNR file formatting
+
+PACA donor CNSM data was downloaded from the ICGC website.
+
+Format table
+
+```{r, eval = F}
+# r
+
+# Load data
+PACA.CNA.df <- read.csv(gzfile("./Dataset/ICGC/PACA/copy_number_somatic_mutation.tsv.gz"), sep = "\t") # 483,808 entries
+
+# Segment CNR values are either indicated in the mean or the median column. We create a new column to take either value in consideration
+PACA.CNA.df$segment.mean <- rowSums(PACA.CNA.df[,c("segment_mean", "segment_median")], na.rm=TRUE)
+
+# Prepare light table
+PACA.CNA.light.df <- PACA.CNA.df %>%
+  dplyr::select(seqnames = chromosome, start = chromosome_start, end = chromosome_end, donor = icgc_donor_id, mutation.type = mutation_type, copy.number = copy_number, segment.mean = segment.mean)
+
+length(unique(PACA.CNA.light.df$donor)) # 460 donors
+
+# Add PACA cluster information
+PACA.clusters.summary.df <- readRDS(file = "./003_Transcriptomics_cluster_analysis/rds/PACA.clusters.summary.df.rds")
+PACA.clusters.summary.light.df <- PACA.clusters.summary.df %>% dplyr::select(donor, cluster)
+PACA.CNA.light.df <- PACA.CNA.light.df %>% filter(donor %in% PACA.clusters.summary.light.df$donor) %>% left_join(PACA.clusters.summary.light.df, by = "donor") %>% distinct()
+
+# Save
+saveRDS(PACA.CNA.light.df, file = "./004_Genome_rearrangements/rds/ICGC.PACA.CNA.df.rds")
+```
+
+## CNV occurences
+
+Characterise the nature and extend of CNR fragments in PACA genomes.
+
+In this section we consider only fragments longer than 500kb.
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(scales)
+library(forcats)
+setwd("/Users/pm23/Desktop/Projects/OriCan")
+
+###########################################################
+# Count number of segments and their median length per genome per clusters
+
+# Load data
+
+ICGC.PACA.CNA.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.PACA.CNA.df.rds")
+
+# Summarise data
+
+PACA.segment.count.df <- ICGC.PACA.CNA.df %>% filter(end-start >= 500000) %>% group_by(donor, cluster) %>% summarise(segment.count = n(), segment.length = median((end-start)/1000, na.rm = T))
+saveRDS(PACA.segment.count.df, file = "./004_Genome_rearrangements/rds/PACA.segment.count.df.rds")
+
+# Plot
+
+PACA.segment.count.plot <- PACA.segment.count.df %>% ggplot(aes(x=cluster, y=segment.count)) +
+  geom_boxplot(aes(fill = cluster), alpha = 0.5, outlier.shape = NA) + geom_jitter(alpha = 0.2) +
+  scale_fill_manual(values = c("#E41F1A", "#F39200", "#4F4A75")) + ylab("CNR segment count") +
+  scale_y_continuous(trans = log10_trans(), limits = c(50,4000)) +
+  ggtitle("Pval = 0.8315 & 1.261e-08") +
+  theme_bw() + theme(aspect.ratio = 2, axis.title.x=element_blank(), legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5))
+PACA.segment.count.plot
+
+PACA.segment.length.plot <- PACA.segment.count.df %>% ggplot(aes(x=cluster, y=segment.length)) +
+  geom_boxplot(aes(fill = cluster), alpha = 0.5, outlier.shape = NA) + geom_jitter(alpha = 0.2) +
+  scale_fill_manual(values = c("#E41F1A", "#F39200", "#4F4A75")) + ylab("CNR median segment length (kb)") +
+  scale_y_continuous(trans = log10_trans(), limits = c(900,30000)) +
+  ggtitle("Pval = 0.5267 & 6.377e-13") +
+  theme_bw() + theme(aspect.ratio = 2, axis.title.x=element_blank(), legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5))
+PACA.segment.length.plot
+
+# Statistics
+ks.test(PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.1"),]$segment.count,
+        PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.2"),]$segment.count) # p-value = 0.8315
+ks.test(PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.2"),]$segment.count,
+        PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.3"),]$segment.count) # p-value = 1.261e-08
+ks.test(PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.1"),]$segment.length,
+        PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.2"),]$segment.length) # p-value = 0.5267
+ks.test(PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.2"),]$segment.length,
+        PACA.segment.count.df[which(PACA.segment.count.df$cluster == "clust.3"),]$segment.length) # p-value = 6.377e-13
+
+# Save plots
+
+pdf("./Rplots/PACA.segment.summary.plot.pdf", width=12, height=5, useDingbats=FALSE)
+ggarrange(PACA.segment.count.plot, PACA.segment.length.plot, nrow=1)
+dev.off()
+
+###########################################################
+# Assess CNV mutation types for PACA genomes
+
+# Summarise data
+
+# Plot by PACA clusters
+
+ICGC.PACA.CNA.mut.type.df <- ICGC.PACA.CNA.df %>% filter(end-start >= 500000) %>% filter(copy.number %in% c(1:10)) %>%
+  group_by(cluster, copy.number, mutation.type) %>% summarise(count = n()) %>% mutate(freq = count/sum(count))
+
+ICGC.PACA.CNA.mut.type.PACA.1.plot <- ICGC.PACA.CNA.mut.type.df %>% filter(cluster == "clust.1") %>%
+  mutate(Type = fct_relevel(mutation.type, "loss", "copy neutral LOH", "amp LOH", "gain")) %>% 
+      ggplot(aes(fill=Type, y=count, x=copy.number)) +
+      geom_bar(position="stack", stat="identity", linewidth = 0.25, color="#010101") + xlab("Copy number") + ylab("Count") + ggtitle("PACA 1") +
+      scale_fill_manual(values = c("#4F4A75", "#D4D2D2", "#E41F1A", "#F39200")) +
+      theme_bw() + theme(aspect.ratio=2, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.PACA.CNA.mut.type.PACA.1.plot
+
+ICGC.PACA.CNA.mut.type.PACA.2.plot <- ICGC.PACA.CNA.mut.type.df %>% filter(cluster == "clust.2") %>%
+  mutate(Type = fct_relevel(mutation.type, "loss", "copy neutral LOH", "amp LOH", "gain")) %>% 
+      ggplot(aes(fill=Type, y=count, x=copy.number)) +
+      geom_bar(position="stack", stat="identity", linewidth = 0.25, color="#010101") + xlab("Copy number") + ylab("Count") + ggtitle("PACA 2") +
+      scale_fill_manual(values = c("#4F4A75", "#D4D2D2", "#E41F1A", "#F39200")) +
+      theme_bw() + theme(aspect.ratio=2, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.PACA.CNA.mut.type.PACA.2.plot
+
+ICGC.PACA.CNA.mut.type.PACA.3.plot <- ICGC.PACA.CNA.mut.type.df %>% filter(cluster == "clust.3") %>%
+  mutate(Type = fct_relevel(mutation.type, "loss", "copy neutral LOH", "amp LOH", "gain")) %>% 
+      ggplot(aes(fill=Type, y=count, x=copy.number)) +
+      geom_bar(position="stack", stat="identity", linewidth = 0.25, color="#010101") + xlab("Copy number") + ylab("Count") + ggtitle("PACA 3") +
+      scale_fill_manual(values = c("#4F4A75", "#D4D2D2", "#E41F1A", "#F39200")) +
+      theme_bw() + theme(aspect.ratio=2, panel.grid.minor = element_line(linetype = "dotted"))
+ICGC.PACA.CNA.mut.type.PACA.3.plot
+
+# Save plots
+
+pdf("./Rplots/PACA.segment.type.plot.pdf", width=12, height=5, useDingbats=FALSE)
+ggarrange(ICGC.PACA.CNA.mut.type.PACA.1.plot, ICGC.PACA.CNA.mut.type.PACA.2.plot, ICGC.PACA.CNA.mut.type.PACA.3.plot, nrow=1)
+dev.off()
+```
+
+## CNV signatures
+
+Extract CNV signatures from PACA tumours according to the nomenclature introduced in Steele et al. Nature, 2022, 606, 984 (https://www.nature.com/articles/s41586-022-04738-6). Length and copy number inervals have been slightly modified to higlight differences bewteen PACA clusters.
+
+```{r, eval = F}
+# r
+
+# Load results
+ICGC.PACA.CNA.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.PACA.CNA.df.rds")
+
+# We consider each type of CNV binned in 7 length intervals
+# Loss events are counted without considering CNV length
+
+CNV.sig.df <- ICGC.PACA.CNA.df %>% filter(mutation.type != "undetermined") %>%
+  mutate(mutation.type = case_when(mutation.type == "loss" & copy.number >= 0.8 & copy.number <= 1.2 ~ "hemizygous del LOH",
+                                   mutation.type == "copy neutral" & copy.number >= 0.8 & copy.number <= 1.2 ~ "hemizygous del LOH",
+                                   mutation.type == "loss" & copy.number >= -0.2 & copy.number <= 0.2 ~ "loss",
+                                   T ~ mutation.type)) %>% 
+  mutate(cnvHet = case_when(mutation.type == "copy neutral LOH" | mutation.type == "amp LOH" | mutation.type == "hemizygous del LOH" ~ "LOH",
+                            mutation.type == "loss" ~ "0",
+                            T ~ "Het")) %>% filter(cnvHet != "NA") %>%
+  mutate(cp = case_when(mutation.type == "loss" ~ "0",
+                        copy.number >= 0.8 & copy.number <= 1.2 ~ "1",
+                        copy.number >= 1.8 & copy.number <= 2.2 ~ "2",
+                        copy.number >= 2.8 & copy.number <= 3.2 ~ "3",
+                        copy.number >= 3.8 & copy.number <= 4.2 ~ "4-5",
+                        copy.number >= 4.8 & copy.number <= 5.2 ~ "4-5",
+                        copy.number > 5.8 ~ "6+",
+                        T ~ NA)) %>% filter(cp != "NA") %>% 
+  mutate(cnvlength = case_when(abs(end-start) >= 0 & abs(end-start) <= 100e3 ~ "0-0.1Mb",
+                               abs(end-start) > 100e3 & abs(end-start) <= 1e6 ~ "0.1-1Mb",
+                               abs(end-start) > 1e6 & abs(end-start) <= 2e6 ~ "1-2Mb",
+                               abs(end-start) > 2e6 & abs(end-start) <= 3e6 ~ "2-3Mb",
+                               abs(end-start) > 3e6 & abs(end-start) <= 5e6 ~ "3-5Mb",
+                               abs(end-start) > 5e6 & abs(end-start) <= 10e6 ~ "5-10Mb",
+                               abs(end-start) > 10e6 ~ ">10Mb",
+                               mutation.type == "loss" ~ "loss",
+                               T ~ NA)) %>% filter(cnvlength != "NA") %>% 
+  mutate(sig = paste(cnvHet, cp, cnvlength, sep = "_"))
+# Change all cp 0 to loss
+CNV.sig.df[grepl("0", CNV.sig.df$cp),]$cnvHet <- 0
+# CNV.sig.df[grepl("0", CNV.sig.df$cp),]$sig <- 0
+
+# 
+# temp <- CNV.sig.df %>% filter(cp == 0)
+# hist(log10(temp$end-temp$start), breaks = 100, xlim =c(1,9))
+
+# Prepare empty table
+cnvHet <- c("LOH", "Het")
+cp <- c("0", "1", "2", "3", "4-5", "6+")
+cnvlength <- c("0-0.1Mb", "0.1-1Mb", "1-2Mb", "2-3Mb", "3-5Mb", "5-10Mb", "5-10Mb", ">10Mb")
+CNV.sig.init.df <- expand.grid(cnvHet, cp, cnvlength)
+colnames(CNV.sig.init.df) <- c("cnvHet", "cp", "cnvlength")
+CNV.sig.init.df <- rbind(CNV.sig.init.df, cbind(cnvlength = "loss", cnvHet = "0", cp = "0")) %>% mutate(sig = paste(cnvHet, cp, cnvlength, sep = "_"))
+# Change all cp 0 to loss
+CNV.sig.init.df[grepl("0", CNV.sig.init.df$cp),]$cnvHet <- 0
+# CNV.sig.init.df[grepl("0", CNV.sig.init.df$cp),]$sig <- 0
+# Remove extra signatures associated to cp 0
+CNV.sig.init.df <- CNV.sig.init.df[!grepl("Het_0", CNV.sig.init.df$sig),]
+# Remove extra signatures associated to cp 1-Het
+CNV.sig.init.df <- CNV.sig.init.df[!grepl("Het_1", CNV.sig.init.df$sig),]
+
+# PACA1 CNV signature
+PACA1.CNV.sig.df <- CNV.sig.df %>% filter(cluster == "clust.1") %>% group_by(sig) %>% summarise(count = n()) %>%
+  right_join(CNV.sig.init.df, by = "sig") %>% ungroup() %>% mutate(freq = count/sum(count, na.rm = T)) %>% dplyr::select(-count)
+PACA1.CNV.sig.df[is.na(PACA1.CNV.sig.df)] <- 0
+saveRDS(PACA1.CNV.sig.df, file = "./004_Genome_rearrangements/rds/PACA1.CNV.sig.df.rds")
+
+# PACA2 CNV signature
+PACA2.CNV.sig.df <- CNV.sig.df %>% filter(cluster == "clust.2") %>% group_by(cnvlength, cnvHet, cp) %>% summarise(count = n()) %>%
+  right_join(CNV.sig.init.df, by = c("cnvlength", "cnvHet", "cp")) %>% ungroup() %>% mutate(freq = count/sum(count, na.rm = T)) %>% dplyr::select(-count)
+PACA2.CNV.sig.df[is.na(PACA2.CNV.sig.df)] <- 0
+saveRDS(PACA2.CNV.sig.df, file = "./004_Genome_rearrangements/rds/PACA2.CNV.sig.df.rds")
+
+# PACA1 PACA2 mixed CNV signature
+PACA1.PACA2.CNV.sig.df <- CNV.sig.df %>% filter(cluster == "clust.1" | cluster == "clust.2") %>% group_by(sig) %>% summarise(count = n()) %>%
+  right_join(CNV.sig.init.df, by = "sig") %>% ungroup() %>% mutate(freq = count/sum(count, na.rm = T)) %>% dplyr::select(-count)
+PACA1.PACA2.CNV.sig.df[is.na(PACA1.PACA2.CNV.sig.df)] <- 0
+saveRDS(PACA1.PACA2.CNV.sig.df, file = "./004_Genome_rearrangements/rds/PACA1.PACA2.CNV.sig.df.rds")
+
+# PACA3 CNV signature
+PACA3.CNV.sig.df <- CNV.sig.df %>% filter(cluster == "clust.3") %>% group_by(cnvlength, cnvHet, cp) %>% summarise(count = n()) %>%
+  right_join(CNV.sig.init.df, by = c("cnvlength", "cnvHet", "cp")) %>% ungroup() %>% mutate(freq = count/sum(count, na.rm = T)) %>% dplyr::select(-count)
+PACA3.CNV.sig.df[is.na(PACA3.CNV.sig.df)] <- 0
+saveRDS(PACA3.CNV.sig.df, file = "./004_Genome_rearrangements/rds/PACA3.CNV.sig.df.rds")
+```
+
+Plot
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(ggpubr)
+setwd("/Users/pm23/Desktop/Projects/OriCan")
+
+# Load results
+PACA1.CNV.sig.df <- readRDS("./004_Genome_rearrangements/rds/PACA1.CNV.sig.df.rds")
+PACA2.CNV.sig.df <- readRDS("./004_Genome_rearrangements/rds/PACA2.CNV.sig.df.rds")
+PACA1.PACA2.CNV.sig.df <- readRDS("./004_Genome_rearrangements/rds/PACA1.PACA2.CNV.sig.df.rds")
+PACA3.CNV.sig.df <- readRDS("./004_Genome_rearrangements/rds/PACA3.CNV.sig.df.rds")
+
+# Plot
+
+PACA1.CNV.sig.plot <- PACA1.CNV.sig.df %>% distinct() %>% 
+  mutate(CNVlength = fct_relevel(cnvlength, "0-0.1Mb", "0.1-1Mb", "1-2Mb", "2-3Mb", "3-5Mb", "5-10Mb", ">10Mb")) %>%
+  mutate(CNVHet = fct_relevel(cnvHet, "0", "LOH", "Het")) %>% 
+  ggplot(aes(x = sig, y = freq, fill = cp, width = 1)) +
+  geom_bar(stat = "identity", colour = "black", size = .2) + ylim(0,0.12) + ylab("Probability") + xlab("CNV types") + ggtitle("PACA 1") +
+  scale_fill_manual(values = c("#0072B2", "#D4D2D2", "#009E73", "#56B4E9", "#E69F00", "#D55E00")) +
+  theme_bw() + facet_grid(.~CNVHet, space = "free", scales = "free_x") 
+
+PACA2.CNV.sig.plot <- PACA2.CNV.sig.df %>% distinct() %>% 
+  mutate(CNVlength = fct_relevel(cnvlength, "0-0.1Mb", "0.1-1Mb", "1-2Mb", "2-3Mb", "3-5Mb", "5-10Mb", ">10Mb")) %>%
+  mutate(CNVHet = fct_relevel(cnvHet, "0", "LOH", "Het")) %>% 
+  ggplot(aes(x = sig, y = freq, fill = cp, width = 1)) +
+  geom_bar(stat = "identity", colour = "black", size = .2) + ylim(0,0.12) + ylab("Probability") + xlab("CNV types") + ggtitle("PACA 2") +
+  scale_fill_manual(values = c("#0072B2", "#D4D2D2", "#009E73", "#56B4E9", "#E69F00", "#D55E00")) +
+  theme_bw() + facet_grid(.~CNVHet, space = "free", scales = "free_x") 
+
+PACA1.PACA2.CNV.sig.plot <- PACA1.PACA2.CNV.sig.df %>% distinct() %>% 
+  mutate(CNVlength = fct_relevel(cnvlength, "0-0.1Mb", "0.1-1Mb", "1-2Mb", "2-3Mb", "3-5Mb", "5-10Mb", ">10Mb")) %>%
+  mutate(CNVHet = fct_relevel(cnvHet, "0", "LOH", "Het")) %>% 
+  ggplot(aes(x = sig, y = freq, fill = cp, width = 1)) +
+  geom_bar(stat = "identity", colour = "black", size = .2) + ylim(0,0.12) + ylab("Probability") + xlab("CNV types") + ggtitle("PACA 1 and PACA 2") +
+  scale_fill_manual(values = c("#0072B2", "#D4D2D2", "#009E73", "#56B4E9", "#E69F00", "#D55E00")) +
+  theme_bw() + facet_grid(.~CNVHet, space = "free", scales = "free_x") 
+
+PACA3.CNV.sig.plot <- PACA3.CNV.sig.df %>% distinct() %>% 
+  mutate(CNVlength = fct_relevel(cnvlength, "0-0.1Mb", "0.1-1Mb", "1-2Mb", "2-3Mb", "3-5Mb", "5-10Mb", ">10Mb")) %>%
+  mutate(CNVHet = fct_relevel(cnvHet, "0", "LOH", "Het")) %>% 
+  ggplot(aes(x = sig, y = freq, fill = cp, width = 1)) +
+  geom_bar(stat = "identity", colour = "black", size = .2) + ylim(0,0.12) + ylab("Probability") + xlab("CNV types") + ggtitle("PACA 3") +
+  scale_fill_manual(values = c("#0072B2", "#D4D2D2", "#009E73", "#56B4E9", "#E69F00", "#D55E00")) +
+  theme_bw() + facet_grid(.~CNVHet, space = "free", scales = "free_x") 
+
+ggarrange(PACA1.CNV.sig.plot, PACA2.CNV.sig.plot, PACA3.CNV.sig.plot, nrow = 3)
+
+ggarrange(PACA1.PACA2.CNV.sig.plot, PACA3.CNV.sig.plot, nrow = 2)
+
+# Save plot
+pdf("./Rplots/PACA.CNV.signatures.pdf", width=6, height=6, useDingbats=FALSE)
+ggarrange(PACA1.PACA2.CNV.sig.plot, PACA3.CNV.sig.plot, nrow = 2)
+dev.off()
+```
+
+PACA 1/2 genomes are characterised by focal amplification (1-2 Mb).
+
+## Origin distribution at genomic break points
+
+Compute the number of origins in 100 kb bins of the human genome.
+
+In this section, we consider all constitutive origins.
+
+```{r, eval = F}
+# r
+library(rtracklayer)
+
+# Load origin coordinates
+ori.center.df <- read.table("./Dataset/ori/ori.center.hg19.NCBI.sorted.bed")
+colnames(ori.center.df) <- c("seqnames", "start", "end", "EFF", "ori.id")
+ori.center.gr <- makeGRangesFromDataFrame(ori.center.df, keep.extra.columns = T)
+seqlevelsStyle(ori.center.gr) <- "UCSC"
+# 23838 origins
+
+# Count the number of origins in bins of 100kb
+seqi_19  <- seqinfo(BSgenome.Hsapiens.UCSC.hg19)
+hg19.100kb <- tileGenome(seqi_19, tilewidth = 100000, cut.last.tile.in.chrom = TRUE)
+my.chr <- paste0("chr", c(1:22, "X", "Y"))
+hg19.100kb <- hg19.100kb[seqnames(hg19.100kb) %in% my.chr]
+ori.100kb.count.df <- as.data.frame(mergeByOverlaps(hg19.100kb, ori.center.gr)) %>%
+  mutate(tile.id = paste(hg19.100kb.seqnames, hg19.100kb.start, hg19.100kb.end, sep = "_")) %>%
+  group_by(tile.id) %>% summarise(ori.count = n()) %>%
+  separate(tile.id, c("seqnames", "start", "end"))
+ori.100kb.count.gr <- makeGRangesFromDataFrame(ori.100kb.count.df, keep.extra.columns = T)
+saveRDS(ori.100kb.count.gr, file = "./004_Genome_rearrangements/rds/ori.100kb.count.gr.rds")
+```
+
+Compute matrices.
+
+In this section, we consider only segments longer than 100 kb and smaller than 5 Mb.
+
+Signal are corrected for background values. We hence assess origin excess from background.
+
+```{r, eval = F}
+# r
+library(EnrichedHeatmap)
+
+# Load PACA CNV information and create grange objects
+ICGC.PACA.CNA.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.PACA.CNA.df.rds")
+ICGC.PACA.CNA.gr <- makeGRangesFromDataFrame(ICGC.PACA.CNA.df, keep.extra.columns = T)
+seqlevelsStyle(ICGC.PACA.CNA.gr) <- "UCSC"
+
+# Compute matrix for all segments
+ori.CNA.segment.100kb.mat <-normalizeToMatrix(ori.100kb.count.gr, ICGC.PACA.CNA.gr, value_column = "ori.count", mean_mode = "weighted", extend = 2e6, w = 2e4, background = NA, target_ratio = 0.5)
+saveRDS(ori.CNA.segment.100kb.mat, file = "./004_Genome_rearrangements/rds/ori.CNA.segment.100kb.mat.rds")
+
+# Reload matrix
+ori.CNA.segment.100kb.mat <- readRDS(file = "./004_Genome_rearrangements/rds/ori.CNA.segment.100kb.mat.rds")
+
+# Compare PACA1/2 and PACA3
+ICGC.PACA.CNA.join.df <- as.data.frame(ICGC.PACA.CNA.gr) %>% mutate(PACA = case_when(cluster == "clust.1" | cluster == "clust.2" ~ "PACA1/2", T ~ "PACA3"))
+
+# At gained segments
+ori.CNA.gain.segment.df <- as.data.frame(ori.CNA.segment.100kb.mat) %>%
+  mutate(cluster = ICGC.PACA.CNA.join.df$PACA, width = width(ICGC.PACA.CNA.gr), copy.number = ICGC.PACA.CNA.gr$copy.number) %>%
+  filter(copy.number >= 3) %>% filter(width >= 100000 & width <= 5000000) %>%
+  dplyr::select(-width, -copy.number) %>% group_by(cluster) %>% 
+  summarise_all(~ sum(.x, na.rm = TRUE)) %>% t() %>% `colnames<-`(.[1, ]) %>% .[-1, ] %>% as_tibble() %>% mutate(bin = seq(1,400,1)) %>% 
+  mutate_if(is.character, as.numeric) %>%
+  gather("cluster", "value", -bin) %>% ungroup() %>% group_by(cluster) %>% mutate(EXC = value-mean(value[c(1:80,220:400)]))
+saveRDS(ori.CNA.gain.segment.df, file = "./004_Genome_rearrangements/rds/ori.CNA.gain.segment.df.rds")
+
+# At copy neutral or loss segments
+ori.CNA.loss.segment.df <- as.data.frame(ori.CNA.segment.100kb.mat) %>%
+  mutate(cluster = ICGC.PACA.CNA.join.df$PACA, width = width(ICGC.PACA.CNA.gr), copy.number = ICGC.PACA.CNA.gr$copy.number) %>%
+  filter(copy.number <= 2) %>% filter(width >= 100000 & width <= 5000000) %>%
+  dplyr::select(-width, -copy.number) %>% group_by(cluster) %>% 
+  summarise_all(~ sum(.x, na.rm = TRUE)) %>% t() %>% `colnames<-`(.[1, ]) %>% .[-1, ] %>% as_tibble() %>% mutate(bin = seq(1,400,1)) %>% 
+  mutate_if(is.character, as.numeric) %>%
+  gather("cluster", "value", -bin) %>% ungroup() %>% group_by(cluster) %>% mutate(EXC = value-mean(value[c(1:80,220:400)]))
+saveRDS(ori.CNA.loss.segment.df, file = "./004_Genome_rearrangements/rds/ori.CNA.loss.segment.df.rds")
+
+# Compare by copy number for PACA1/2 genomes
+ori.CNA.copy.number.df <- as.data.frame(ori.CNA.segment.100kb.mat) %>%
+  mutate(cluster = ICGC.PACA.CNA.join.df$PACA, width = width(ICGC.PACA.CNA.gr), copy.number = ICGC.PACA.CNA.gr$copy.number) %>%
+  filter(cluster == "PACA1/2" & copy.number >= 3) %>% filter(width >= 100000 & width <= 5000000) %>%
+  dplyr::select(-cluster, -width) %>% group_by(copy.number) %>% 
+  summarise_all(~ sum(.x, na.rm = TRUE)) %>% t() %>% `colnames<-`(.[1, ]) %>% .[-1, ] %>% as_tibble() %>% mutate(bin = seq(1,400,1)) %>% 
+  mutate_if(is.character, as.numeric) %>%
+  gather("copy.number", "value", -bin) %>% ungroup() %>% group_by(copy.number) %>% mutate(EXC = value-mean(value[c(1:80,220:400)]))
+saveRDS(ori.CNA.copy.number.df, file = "./004_Genome_rearrangements/rds/ori.CNA.copy.number.df.rds")
+
+# Compare fragments of 4 copy number for LOH and Het in PACA1/2 genomes
+ori.CNA.mutation.type.df <- as.data.frame(ori.CNA.segment.100kb.mat) %>%
+  mutate(cluster = ICGC.PACA.CNA.join.df$PACA, width = width(ICGC.PACA.CNA.gr), copy.number = ICGC.PACA.CNA.gr$copy.number, mutation.type = ICGC.PACA.CNA.gr$mutation.type) %>%
+  filter(cluster == "PACA1/2" & copy.number == 4) %>% filter(width >= 100000 & width <= 5000000) %>%
+  dplyr::select(-cluster, -width, -copy.number) %>% group_by(mutation.type) %>% 
+  summarise_all(~ sum(.x, na.rm = TRUE)) %>% t() %>% `colnames<-`(.[1, ]) %>% .[-1, ] %>% as_tibble() %>% mutate(bin = seq(1,400,1)) %>% 
+  mutate_if(is.character, as.numeric) %>%
+  gather("mutation.type", "value", -bin) %>% ungroup() %>% group_by(mutation.type) %>% mutate(EXC = value-mean(value[c(1:80,220:400)]))
+saveRDS(ori.CNA.mutation.type.df, file = "./004_Genome_rearrangements/rds/ori.CNA.mutation.type.df.rds")
+```
+
+Plot results
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(ggpubr)
+setwd("/Users/pm23/Desktop/Projects/OriCan")
+
+# Compare PACA1/2 and PACA3
+
+# At gained segments
+
+ori.CNA.gain.segment.df <- readRDS("./004_Genome_rearrangements/rds/ori.CNA.gain.segment.df.rds")
+ori.CNA.gain.segment.plot <- ori.CNA.gain.segment.df %>% ggplot(aes(x=bin, y=EXC, col=cluster)) +
+  geom_line(size = 0.75) + ylab("Origin enrichment\n(excess from background)") + ggtitle("Gained CNR fragments") +
+  theme_bw() + theme(aspect.ratio=0.5, panel.grid.minor = element_line(linetype = "dotted")) +
+  scale_color_manual(values = c("#E4221E", "#504B76")) +
+  geom_hline(yintercept=0, linetype="dashed") + ylim(-1300, 2500) +
+  scale_x_continuous(name="CNR segments", limits=c(0, 400), n.breaks = 6, labels = c("-2Mb", "start", "50%", "end", "+2Mb"))
+ori.CNA.gain.segment.plot
+
+# At copy neutral or loss segments
+
+ori.CNA.loss.segment.df <- readRDS("./004_Genome_rearrangements/rds/ori.CNA.loss.segment.df.rds")
+ori.CNA.loss.segment.plot <- ori.CNA.loss.segment.df %>% ggplot(aes(x=bin, y=EXC, col=cluster)) +
+  geom_line(size = 0.75) + ylab("Origin enrichment\n(excess from background)") + ggtitle("Copy neutral and loss CNR fragments") +
+  theme_bw() + theme(aspect.ratio=0.5, panel.grid.minor = element_line(linetype = "dotted")) +
+  scale_color_manual(values = c("#E4221E", "#504B76")) +
+  geom_hline(yintercept=0, linetype="dashed") + ylim(-1300, 2500) +
+  scale_x_continuous(name="CNR segments", limits=c(0, 400), n.breaks = 6, labels = c("-2Mb", "start", "50%", "end", "+2Mb"))
+ori.CNA.loss.segment.plot
+
+# Compare PACA1/2 fragments for different copy number
+
+ori.CNA.copy.number.df <- readRDS("./004_Genome_rearrangements/rds/ori.CNA.copy.number.df.rds")
+ori.CNA.copy.number.plot <- ori.CNA.copy.number.df %>% ggplot(aes(x=bin, y=EXC, col=copy.number)) +
+  geom_line(size = 0.75) + ylab("Origin enrichment\n(excess from background)") + ggtitle("PACA1/2 CNR fragments") +
+  theme_bw() + theme(aspect.ratio=0.5, panel.grid.minor = element_line(linetype = "dotted")) +
+  scale_color_manual(values = c("#56B4E9", "#E69F00", "#D55E00", "#E4221E", "#C01818", "#7E1333")) +
+  geom_hline(yintercept=0, linetype="dashed") + ylim(-1000, 1400) +
+  scale_x_continuous(name="CNR segments", limits=c(0, 400), n.breaks = 6, labels = c("-2Mb", "start", "50%", "end", "+2Mb"))
+ori.CNA.copy.number.plot
+
+# Compare fragments of 4 copy number for LOH and Het in PACA1/2 genomes
+
+ori.CNA.mutation.type.df <- readRDS("./004_Genome_rearrangements/rds/ori.CNA.mutation.type.df.rds")
+ori.CNA.mutation.type.plot <- ori.CNA.mutation.type.df %>% ggplot(aes(x=bin, y=EXC, col=mutation.type)) +
+  geom_line(size = 0.75) + ylab("Origin enrichment\n(excess from background)") + ggtitle("PACA1/2 CNR fragments") +
+  theme_bw() + theme(aspect.ratio=0.5, panel.grid.minor = element_line(linetype = "dotted")) +
+  scale_color_manual(values = c("#575756", "#069F73")) +
+  geom_hline(yintercept=0, linetype="dashed") + ylim(-1000, 1400) +
+  scale_x_continuous(name="CNR segments", limits=c(0, 400), n.breaks = 6, labels = c("-2Mb", "start", "50%", "end", "+2Mb"))
+ori.CNA.mutation.type.plot
+
+pdf("./Rplots/PACA.ori.CNV.pdf", width=6, height=10, useDingbats=FALSE)
+ggarrange(ori.CNA.gain.segment.plot, ori.CNA.loss.segment.plot, ori.CNA.copy.number.plot, ori.CNA.mutation.type.plot, nrow = 4)
+dev.off()
+```
+
+## Origin enrichment at PACA break points
+
+Use of permutation tests to assess enrichment of origins at CNV break points in PACA genomes
+
+```{r, eval = F}
+# r
+library(rtracklayer)
+library(dplyr)
+library(regioneR)
+setwd("/cephfs2/pmurat/OriCan")
+
+# Load PACA CNV information and create grange objects
+ICGC.PACA.CNA.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.PACA.CNA.df.rds")
+ICGC.PACA.CNA.gr <- makeGRangesFromDataFrame(ICGC.PACA.CNA.df, keep.extra.columns = T)
+seqlevelsStyle(ICGC.PACA.CNA.gr) <- "UCSC"
+
+# Select gain segments for PACA1/2 genomes of the appropriate length
+donor.PACA.1.2 <- unique(c(ICGC.PACA.CNA.gr[ICGC.PACA.CNA.gr$cluster == "clust.1"]$donor, ICGC.PACA.CNA.gr[ICGC.PACA.CNA.gr$cluster == "clust.1"]$donor))
+ICGC.PACA.1.2.gain.CNA.gr <- ICGC.PACA.CNA.gr[(ICGC.PACA.CNA.gr$donor %in% donor.PACA.1.2) & ICGC.PACA.CNA.gr$copy.number >= 3 & width(ICGC.PACA.CNA.gr) >= 100000 & width(ICGC.PACA.CNA.gr) <= 5000000]
+# 19780 segments
+
+# Recover CNV boundaries
+ICGC.PACA.1.2.start.gr <- resize(ICGC.PACA.1.2.gain.CNA.gr, 1, fix = "start")
+ICGC.PACA.1.2.end.gr <- resize(ICGC.PACA.1.2.gain.CNA.gr, 1, fix = "end")
+  ICGC.PACA.1.2.bound.gr <- reduce(c(ICGC.PACA.1.2.start.gr, ICGC.PACA.1.2.end.gr))
+
+# Load origin coordinates
+ori.df <- read.table("./Dataset/ori/ori.center.hg19.NCBI.sorted.bed")
+colnames(ori.df) <- c("seqnames", "start", "end", "EFF", "ori.id")
+ori.gr <- makeGRangesFromDataFrame(ori.df, keep.extra.columns = T)
+seqlevelsStyle(ori.gr) <- "UCSC"
+# Add 500 bp flanks
+ori.gr <- ori.gr + 500
+
+numOverlaps(ICGC.PACA.1.2.bound.gr, ori.gr, count.once=TRUE) # 539 boundaries
+
+permut.PACA.1.2.pt <- overlapPermTest(ICGC.PACA.1.2.bound.gr, ori.gr, ntimes=1000, count.once=TRUE)
+saveRDS(permut.PACA.1.2.pt, file = "./004_Genome_rearrangements/rds/permut.PACA.1.2.pt.rds")
+```
+
+Plot result of permutation test
+
+Plot results
+
+```{r message=FALSE, warning=FALSE, eval = T}
+library(dplyr)
+library(regioneR)
+setwd("/Users/pm23/Desktop/Projects/OriCan")
+
+permut.PACA.1.2.pt <- readRDS(file = "./004_Genome_rearrangements/rds/permut.PACA.1.2.pt.rds")
+plot(permut.PACA.1.2.pt)
+
+pdf("./Rplots/PACA.ori.CNV.permutation.pdf", width=6, height=4, useDingbats=FALSE)
+plot(permut.PACA.1.2.pt)
+dev.off()
+```
+
+## Functional consequences of origin-mediated CNA
+
+Assess the overlap between CNR segments with origin at boundaries and genes.
+
+```{r, eval = F}
+# Recover segments with origin boundaries
+
+# Load PACA CNV information and create grange objects
+ICGC.PACA.CNA.df <- readRDS(file = "./004_Genome_rearrangements/rds/ICGC.PACA.CNA.df.rds")
+
+# Select segment of interest and add ids
+ICGC.PACA.CNA.filter.df <- ICGC.PACA.CNA.df %>% 
+  filter(copy.number == 4 & (cluster == "clust.1" | cluster == "clust.2") & (end - start) >= 100000 & (end - start) <= 5000000) %>% 
+  mutate(CNV.id = paste(seqnames, start, end, sep = "_"))
+ICGC.PACA.CNA.filter.gr <- makeGRangesFromDataFrame(ICGC.PACA.CNA.filter.df, keep.extra.columns = T)
+seqlevelsStyle(ICGC.PACA.CNA.filter.gr) <- "UCSC"
+
+# Recover segment boundaries
+ICGC.PACA.CNA.filter.start.gr <- resize(ICGC.PACA.CNA.filter.gr, 1, fix = "start")
+ICGC.PACA.CNA.filter.end.gr <- resize(ICGC.PACA.CNA.filter.gr, 1, fix = "end")
+seqlevelsStyle(ICGC.PACA.CNA.filter.start.gr) <- "UCSC"
+seqlevelsStyle(ICGC.PACA.CNA.filter.end.gr) <- "UCSC"
+
+# Identify boundaries overlapping with origins
+ICGC.PACA.CNA.filter.start.ori.overlap.gr <- subsetByOverlaps(ICGC.PACA.CNA.filter.start.gr, ori.gr) # 302 segments
+ICGC.PACA.CNA.filter.end.ori.overlap.gr <- subsetByOverlaps(ICGC.PACA.CNA.filter.end.gr, ori.gr) # 293 segments
+ori.CNV.id <- unique(c(ICGC.PACA.CNA.filter.start.ori.overlap.gr$CNV.id, ICGC.PACA.CNA.filter.end.ori.overlap.gr$CNV.id)) # 566 segments
+
+# Filter segments of interest
+ICGC.PACA.CNA.ori.gr <- ICGC.PACA.CNA.filter.gr[ICGC.PACA.CNA.filter.gr$CNV.id %in% ori.CNV.id]
+
+# Compute distance to genes
+CNV.gene.nearest <- distanceToNearest(ICGC.PACA.CNA.ori.gr, hsapiens.coding.genes.gr)
+CNV.gene.nearest.df <- cbind.data.frame(as.data.frame(ICGC.PACA.CNA.ori.gr), ncbi.gene.id = as.numeric(hsapiens.coding.genes.gr[subjectHits(CNV.gene.nearest)]$gene_id), dist = CNV.gene.nearest@elementMetadata$distance) %>% left_join(hsapiens.coding.genes, by = "ncbi.gene.id")
+saveRDS(CNV.gene.nearest.df, file = "./004_Genome_rearrangements/rds/CNV.gene.nearest.df.rds")
+
+# Compute gene occurence
+CNV.occ.df <- CNV.gene.nearest.df %>% group_by(gene.symbol) %>% summarise(count = n())
+```
+
+List of potential functional origin-associated CNVs comprises:
+- 300-800kb CNAs overlapping SOX11 in 5 independent donors. SOX11 is overexpressed in pancreatic neoplasms (https://pubmed.ncbi.nlm.nih.gov/29272888/).
+- 700kb to 2.7Mb CNAs overlapping CDK11B in 4 independent donors. This kinase targets cyclin B that control G2/M transition.
+- 900kb to 1.2Mb CNAs overlapping EIF3B in 4 independent donors. EIF3B promotes cancer progression in pancreatic cancer (https://www.tandfonline.com/doi/full/10.1080/00365521.2020.1868566).
+- 900kb to 2.4Mb CNAs overlapping MTA1 in 4 independent donors. MTA1 promotes the invasion and migration of pancreatic cancer cells (metastasis, https://pubmed.ncbi.nlm.nih.gov/30396299/).
+- a 1.2Mb CNAs overlapping BRCA2 in 2 independent donors.
